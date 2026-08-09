@@ -1,17 +1,7 @@
-# scana
+﻿# Scana
 
-A new Flutter project.
+Scana는 모든 핵심 처리를 단말 내부에서 수행하는 Android 전용 오프라인 문서 스캐너다.
 
-## Getting Started
+현재는 기능 구현 전의 기반 구조만 제공한다. OpenCV, OCR, Camera, PDF 및 기타 외부 라이브러리는 추가하지 않았다.
 
-This project is a starting point for a Flutter application.
-
-A few resources to get you started if this is your first Flutter project:
-
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+프로젝트 요구사항과 설계 문서는 [docs](docs)에서 확인할 수 있다.
