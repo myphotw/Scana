@@ -1,13 +1,15 @@
 import 'package:camera/camera.dart';
 
 /// Owns the initialized camera controller used by the scanning flow.
-///
-/// Future scan, capture, and image-processing capabilities should use this
-/// session instead of accessing the camera plugin from UI widgets.
 class CameraSession {
   CameraSession._(this.controller);
 
   final CameraController controller;
+
+  Future<String> captureRawImage() async {
+    final capturedImage = await controller.takePicture();
+    return capturedImage.path;
+  }
 
   /// Initializes the preferred rear camera before the app UI is displayed.
   static Future<CameraStartup> initializeDefault() async {
