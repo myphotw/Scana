@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:convert';
 
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
@@ -14,6 +15,8 @@ abstract interface class ScanSessionStorage {
 
   Future<List<ScanSession>> findRecoverableSessions();
 
+  Future<void> saveSession(ScanSession session);
+
   Future<String> storeRawPage({
     required String sessionId,
     required int pageNo,
@@ -21,6 +24,8 @@ abstract interface class ScanSessionStorage {
   });
 
   Future<void> deleteSession(String sessionId);
+
+  Future<void> deletePageFile(String rawImagePath);
 }
 
 /// Stores sessions in the app support directory, outside OS-managed caches.
@@ -43,6 +48,29 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
   }
 
   @override
+  Future<void> saveSession(ScanSession session) async {
+    final sessionDirectory = await _sessionDirectory(session.id);
+    await sessionDirectory.create(recursive: true);
+    final metadata = <String, Object>{
+      'id': session.id,
+      'createdTime': session.createdTime.toIso8601String(),
+      'pages': session.pages
+          .map(
+            (page) => <String, Object>{
+              'pageNo': page.pageNo,
+              'rawImageFile': path.basename(page.rawImagePath),
+              'createdTime': page.createdTime.toIso8601String(),
+              'rotation': page.rotation,
+            },
+          )
+          .toList(),
+    };
+    await File(
+      path.join(sessionDirectory.path, 'session.json'),
+    ).writeAsString(jsonEncode(metadata));
+  }
+
+  @override
   Future<List<ScanSession>> findRecoverableSessions() async {
     final appPrivateDirectory = await _appPrivateDirectoryProvider();
     final sessionsDirectory = Directory(
@@ -58,48 +86,118 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
         continue;
       }
 
-      final pages = <ScanPage>[];
-      await for (final fileEntity in entity.list(followLinks: false)) {
-        if (fileEntity is! File) {
-          continue;
-        }
-
-        final match = _rawPageName.firstMatch(path.basename(fileEntity.path));
-        final pageNo = match == null ? null : int.tryParse(match.group(1)!);
-        if (pageNo == null) {
-          continue;
-        }
-
-        pages.add(
-          ScanPage(
-            pageNo: pageNo,
-            rawImagePath: fileEntity.path,
-            createdTime: (await fileEntity.stat()).modified,
-          ),
-        );
-      }
-      pages.sort((first, second) => first.pageNo.compareTo(second.pageNo));
-      final createdTime = pages.isEmpty
-          ? (await entity.stat()).modified
-          : pages
-                .map((page) => page.createdTime)
-                .reduce(
-                  (first, second) => first.isBefore(second) ? first : second,
-                );
-      final session = ScanSession(
-        id: path.basename(entity.path),
-        createdTime: createdTime,
-      );
-      for (final page in pages) {
-        session.addPage(page);
-      }
-      sessions.add(session);
+      final recoveredSession = await _readSessionMetadata(entity);
+      sessions.add(recoveredSession ?? await _recoverFromRawFiles(entity));
     }
 
     sessions.sort(
       (first, second) => second.createdTime.compareTo(first.createdTime),
     );
     return sessions;
+  }
+
+  Future<ScanSession?> _readSessionMetadata(Directory sessionDirectory) async {
+    final metadataFile = File(path.join(sessionDirectory.path, 'session.json'));
+    if (!await metadataFile.exists()) {
+      return null;
+    }
+
+    try {
+      final metadata = jsonDecode(await metadataFile.readAsString());
+      if (metadata is! Map<String, dynamic> ||
+          metadata['id'] != path.basename(sessionDirectory.path) ||
+          metadata['pages'] is! List) {
+        return null;
+      }
+      final createdTime = DateTime.tryParse(
+        metadata['createdTime'] as String? ?? '',
+      );
+      if (createdTime == null) {
+        return null;
+      }
+
+      final session = ScanSession(
+        id: metadata['id'] as String,
+        createdTime: createdTime,
+      );
+      for (final pageData in metadata['pages'] as List<dynamic>) {
+        if (pageData is! Map<String, dynamic>) {
+          return null;
+        }
+        final pageNo = pageData['pageNo'] as int?;
+        final rawImageFile = pageData['rawImageFile'] as String?;
+        final pageCreatedTime = DateTime.tryParse(
+          pageData['createdTime'] as String? ?? '',
+        );
+        final rotation = pageData['rotation'] as int?;
+        if (pageNo == null ||
+            rawImageFile == null ||
+            !_isRelativeFileName(rawImageFile) ||
+            pageCreatedTime == null ||
+            !_isValidRotation(rotation)) {
+          return null;
+        }
+
+        final rawImagePath = path.join(sessionDirectory.path, rawImageFile);
+        if (!await File(rawImagePath).exists()) {
+          return null;
+        }
+        session.addPage(
+          ScanPage(
+            pageNo: pageNo,
+            rawImagePath: rawImagePath,
+            createdTime: pageCreatedTime,
+            rotation: rotation!,
+          ),
+        );
+      }
+      return session;
+    } on FormatException {
+      return null;
+    } on FileSystemException {
+      return null;
+    } on TypeError {
+      return null;
+    }
+  }
+
+  Future<ScanSession> _recoverFromRawFiles(Directory entity) async {
+    final pages = <ScanPage>[];
+    await for (final fileEntity in entity.list(followLinks: false)) {
+      if (fileEntity is! File) {
+        continue;
+      }
+
+      final match = _rawPageName.firstMatch(path.basename(fileEntity.path));
+      final pageNo = match == null ? null : int.tryParse(match.group(1)!);
+      if (pageNo == null) {
+        continue;
+      }
+
+      pages.add(
+        ScanPage(
+          pageNo: pageNo,
+          rawImagePath: fileEntity.path,
+          createdTime: (await fileEntity.stat()).modified,
+        ),
+      );
+    }
+    pages.sort((first, second) => first.pageNo.compareTo(second.pageNo));
+    final createdTime = pages.isEmpty
+        ? (await entity.stat()).modified
+        : pages
+              .map((page) => page.createdTime)
+              .reduce(
+                (first, second) => first.isBefore(second) ? first : second,
+              );
+    final session = ScanSession(
+      id: path.basename(entity.path),
+      createdTime: createdTime,
+    );
+    for (final page in pages) {
+      session.addPage(page);
+    }
+    return session;
   }
 
   @override
@@ -111,8 +209,18 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
     final directory = await _sessionDirectory(sessionId);
     await directory.create(recursive: true);
 
-    final fileName = 'raw_${pageNo.toString().padLeft(3, '0')}.jpg';
-    final destinationPath = path.join(directory.path, fileName);
+    var fileIndex = pageNo;
+    var destinationPath = path.join(
+      directory.path,
+      'raw_${fileIndex.toString().padLeft(3, '0')}.jpg',
+    );
+    while (await File(destinationPath).exists()) {
+      fileIndex++;
+      destinationPath = path.join(
+        directory.path,
+        'raw_${fileIndex.toString().padLeft(3, '0')}.jpg',
+      );
+    }
     final source = File(capturedImagePath);
     await source.copy(destinationPath);
 
@@ -131,6 +239,14 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
     }
   }
 
+  @override
+  Future<void> deletePageFile(String rawImagePath) async {
+    final file = File(rawImagePath);
+    if (await file.exists()) {
+      await file.delete();
+    }
+  }
+
   Future<Directory> _sessionDirectory(String sessionId) async {
     final appPrivateDirectory = await _appPrivateDirectoryProvider();
     return Directory(
@@ -139,4 +255,12 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
   }
 
   static final RegExp _rawPageName = RegExp(r'^raw_(\d+)\.jpg$');
+
+  static bool _isRelativeFileName(String value) {
+    return !path.isAbsolute(value) && path.basename(value) == value;
+  }
+
+  static bool _isValidRotation(int? value) {
+    return value == 0 || value == 90 || value == 180 || value == 270;
+  }
 }

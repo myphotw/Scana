@@ -52,7 +52,13 @@ class _TestSessionStorage implements ScanSessionStorage {
   Future<void> deleteSession(String sessionId) async {}
 
   @override
+  Future<void> deletePageFile(String rawImagePath) async {}
+
+  @override
   Future<List<ScanSession>> findRecoverableSessions() async => [];
+
+  @override
+  Future<void> saveSession(ScanSession session) async {}
 
   @override
   Future<String> storeRawPage({

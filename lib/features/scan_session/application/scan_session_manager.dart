@@ -83,8 +83,35 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
       createdTime: _clock(),
     );
     session.addPage(page);
+    await _storage.saveSession(session);
     notifyListeners();
     return page;
+  }
+
+  Future<void> deletePageAt(int index) async {
+    _ensureOpen();
+    final session = _requireSession();
+    final page = session.pages[index];
+    await _storage.deletePageFile(page.rawImagePath);
+    session.removePageAt(index);
+    await _storage.saveSession(session);
+    notifyListeners();
+  }
+
+  Future<void> reorderPages(int oldIndex, int newIndex) async {
+    _ensureOpen();
+    final session = _requireSession();
+    session.reorderPages(oldIndex, newIndex);
+    await _storage.saveSession(session);
+    notifyListeners();
+  }
+
+  Future<void> rotatePageAt(int index) async {
+    _ensureOpen();
+    final session = _requireSession();
+    session.rotatePageAt(index);
+    await _storage.saveSession(session);
+    notifyListeners();
   }
 
   @override
@@ -124,7 +151,16 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
       createdTime: _clock(),
     );
     await _storage.createSession(session.id);
+    await _storage.saveSession(session);
     _currentSession = session;
+    return session;
+  }
+
+  ScanSession _requireSession() {
+    final session = _currentSession;
+    if (session == null) {
+      throw StateError('No active scan session.');
+    }
     return session;
   }
 

@@ -1,9 +1,12 @@
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 
+import 'package:scana/features/page_editor/presentation/page_editor_page.dart';
 import 'package:scana/features/scan_session/application/scan_session_manager.dart';
+import 'package:scana/models/scan_page.dart';
 import 'package:scana/models/scan_session.dart';
 import 'package:scana/services/camera/camera_session.dart';
 
@@ -109,6 +112,7 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
         fit: StackFit.expand,
         children: [
           CameraPreview(cameraSession.controller),
+          const _ScanGuideOverlay(),
           SafeArea(
             child: AnimatedBuilder(
               animation: widget.sessionManager,
@@ -123,6 +127,36 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
                   ),
                 );
               },
+            ),
+          ),
+          SafeArea(
+            child: Align(
+              alignment: Alignment.bottomLeft,
+              child: AnimatedBuilder(
+                animation: widget.sessionManager,
+                builder: (context, child) {
+                  final pages =
+                      widget.sessionManager.currentSession?.pages ?? const [];
+                  if (pages.isEmpty) {
+                    return const SizedBox.shrink();
+                  }
+                  return Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 0, 0, 24),
+                    child: _LatestPageThumbnail(
+                      page: pages.last,
+                      onTap: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (context) => PageEditorPage(
+                              sessionManager: widget.sessionManager,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  );
+                },
+              ),
             ),
           ),
           SafeArea(
@@ -152,6 +186,108 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _ScanGuideOverlay extends StatelessWidget {
+  const _ScanGuideOverlay();
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          CustomPaint(painter: _ScanGuidePainter()),
+          const Align(
+            alignment: Alignment(0, 0.68),
+            child: DecoratedBox(
+              decoration: BoxDecoration(color: Colors.black54),
+              child: Padding(
+                padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                child: Text(
+                  '문서를 가이드 안에 맞춰 주세요',
+                  style: TextStyle(color: Colors.white),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ScanGuidePainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final guideWidth = size.width * 0.78;
+    final guideHeight = math.min(size.height * 0.68, guideWidth * 1.414);
+    final guide = RRect.fromRectAndRadius(
+      Rect.fromCenter(
+        center: size.center(Offset.zero),
+        width: guideWidth,
+        height: guideHeight,
+      ),
+      const Radius.circular(16),
+    );
+    final dimmedArea = Path()
+      ..fillType = PathFillType.evenOdd
+      ..addRect(Offset.zero & size)
+      ..addRRect(guide);
+    canvas.drawPath(dimmedArea, Paint()..color = Colors.black38);
+    canvas.drawRRect(
+      guide,
+      Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+class _LatestPageThumbnail extends StatelessWidget {
+  const _LatestPageThumbnail({required this.page, required this.onTap});
+
+  final ScanPage page;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: Ink(
+          width: 64,
+          height: 88,
+          decoration: BoxDecoration(
+            border: Border.all(color: Colors.white, width: 2),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Transform.rotate(
+              angle: page.rotation * math.pi / 180,
+              child: Image.file(
+                File(page.rawImagePath),
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) {
+                  return const ColoredBox(
+                    color: Colors.black54,
+                    child: Icon(Icons.image_not_supported_outlined),
+                  );
+                },
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

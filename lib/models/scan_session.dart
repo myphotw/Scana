@@ -14,7 +14,25 @@ class ScanSession {
     _pages.add(page);
   }
 
-  void sortPages() {
-    _pages.sort((first, second) => first.pageNo.compareTo(second.pageNo));
+  ScanPage removePageAt(int index) {
+    final page = _pages.removeAt(index);
+    _renumberPages();
+    return page;
+  }
+
+  void reorderPages(int oldIndex, int newIndex) {
+    final page = _pages.removeAt(oldIndex);
+    _pages.insert(newIndex, page);
+    _renumberPages();
+  }
+
+  void rotatePageAt(int index) {
+    _pages[index] = _pages[index].rotateClockwise();
+  }
+
+  void _renumberPages() {
+    for (var index = 0; index < _pages.length; index++) {
+      _pages[index] = _pages[index].copyWith(pageNo: index + 1);
+    }
   }
 }

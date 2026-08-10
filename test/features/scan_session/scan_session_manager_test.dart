@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -54,6 +55,17 @@ void main() {
     expect(await File(secondPage.rawImagePath).exists(), isTrue);
     expect(await firstCapture.exists(), isFalse);
     expect(await secondCapture.exists(), isFalse);
+
+    final metadata =
+        jsonDecode(
+              await File(
+                path.join(expectedDirectory, 'session.json'),
+              ).readAsString(),
+            )
+            as Map<String, dynamic>;
+    expect(metadata['id'], 'session-uuid');
+    expect((metadata['pages'] as List).first['rawImageFile'], 'raw_001.jpg');
+    expect((metadata['pages'] as List).first['rotation'], 0);
   });
 
   test('cancel deletes the current temporary session', () async {
@@ -134,6 +146,124 @@ void main() {
     expect(await sessionDirectory.exists(), isFalse);
     expect(manager.currentSession, isNull);
   });
+
+  test('persists page rotation and custom order in session metadata', () async {
+    final firstCapture = await _createCapture(testRoot, 'capture_1.jpg');
+    final secondCapture = await _createCapture(testRoot, 'capture_2.jpg');
+    final thirdCapture = await _createCapture(testRoot, 'capture_3.jpg');
+    await manager.addRawCapture(firstCapture.path);
+    await manager.addRawCapture(secondCapture.path);
+    await manager.addRawCapture(thirdCapture.path);
+
+    await manager.rotatePageAt(0);
+    await manager.reorderPages(0, 2);
+    await manager.deletePageAt(1);
+
+    final pages = manager.currentSession!.pages;
+    expect(pages.map((page) => page.pageNo), [1, 2]);
+    expect(pages.map((page) => path.basename(page.rawImagePath)), [
+      'raw_002.jpg',
+      'raw_001.jpg',
+    ]);
+    expect(pages.last.rotation, 90);
+    expect(
+      await File(
+        path.join(
+          testRoot.path,
+          'scan_sessions',
+          'session-uuid',
+          'raw_003.jpg',
+        ),
+      ).exists(),
+      isFalse,
+    );
+
+    final metadata =
+        jsonDecode(
+              await File(
+                path.join(
+                  testRoot.path,
+                  'scan_sessions',
+                  'session-uuid',
+                  'session.json',
+                ),
+              ).readAsString(),
+            )
+            as Map<String, dynamic>;
+    final metadataPages = metadata['pages'] as List<dynamic>;
+    expect(metadataPages[0]['rawImageFile'], 'raw_002.jpg');
+    expect(metadataPages[0]['pageNo'], 1);
+    expect(metadataPages[1]['rawImageFile'], 'raw_001.jpg');
+    expect(metadataPages[1]['rotation'], 90);
+  });
+
+  test(
+    'uses session metadata before raw file name order during recovery',
+    () async {
+      final sessionDirectory = Directory(
+        path.join(testRoot.path, 'scan_sessions', 'metadata-session'),
+      );
+      await sessionDirectory.create(recursive: true);
+      await File(
+        path.join(sessionDirectory.path, 'raw_001.jpg'),
+      ).writeAsBytes([1]);
+      await File(
+        path.join(sessionDirectory.path, 'raw_002.jpg'),
+      ).writeAsBytes([2]);
+      await File(
+        path.join(sessionDirectory.path, 'session.json'),
+      ).writeAsString(
+        jsonEncode({
+          'id': 'metadata-session',
+          'createdTime': '2026-08-10T01:02:03.000Z',
+          'pages': [
+            {
+              'pageNo': 1,
+              'rawImageFile': 'raw_002.jpg',
+              'createdTime': '2026-08-10T01:02:04.000Z',
+              'rotation': 90,
+            },
+            {
+              'pageNo': 2,
+              'rawImageFile': 'raw_001.jpg',
+              'createdTime': '2026-08-10T01:02:03.000Z',
+              'rotation': 0,
+            },
+          ],
+        }),
+      );
+
+      final session = (await manager.findRecoverableSessions()).single;
+
+      expect(session.pages.map((page) => path.basename(page.rawImagePath)), [
+        'raw_002.jpg',
+        'raw_001.jpg',
+      ]);
+      expect(session.pages.first.rotation, 90);
+    },
+  );
+
+  test(
+    'falls back to raw file recovery when session metadata is corrupt',
+    () async {
+      final sessionDirectory = Directory(
+        path.join(testRoot.path, 'scan_sessions', 'corrupt-metadata-session'),
+      );
+      await sessionDirectory.create(recursive: true);
+      await File(
+        path.join(sessionDirectory.path, 'raw_001.jpg'),
+      ).writeAsBytes([1]);
+      await File(
+        path.join(sessionDirectory.path, 'session.json'),
+      ).writeAsString('{not valid json');
+
+      final session = (await manager.findRecoverableSessions()).single;
+
+      expect(session.id, 'corrupt-metadata-session');
+      expect(session.pages, hasLength(1));
+      expect(session.pages.single.rotation, 0);
+    },
+  );
 }
 
 Future<File> _createCapture(Directory root, String name) async {
