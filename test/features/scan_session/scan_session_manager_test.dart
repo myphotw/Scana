@@ -5,6 +5,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as path;
 
 import 'package:scana/features/scan_session/application/scan_session_manager.dart';
+import 'package:scana/models/document_detection_result.dart';
+import 'package:scana/services/image_processing/document_detector.dart';
 import 'package:scana/services/storage/scan_session_storage.dart';
 
 void main() {
@@ -264,9 +266,96 @@ void main() {
       expect(session.pages.single.rotation, 0);
     },
   );
+
+  test(
+    'stores detected document corners and restores them from metadata',
+    () async {
+      manager.close();
+      manager = ScanSessionManager(
+        storage: AppPrivateSessionStorage(
+          appPrivateDirectoryProvider: () async => testRoot,
+        ),
+        documentDetector: const _SuccessfulDocumentDetector(),
+        sessionIdGenerator: () => 'detected-session',
+        clock: () => DateTime.utc(2026, 8, 10, 1, 2, 3),
+      );
+      final capture = await _createCapture(testRoot, 'detected.jpg');
+
+      final page = await manager.addRawCapture(capture.path);
+
+      expect(page.documentSourceWidth, 1000);
+      expect(page.documentSourceHeight, 1500);
+      expect(page.documentCorners?.topLeft.x, 50);
+
+      const adjustedCorners = DocumentCorners(
+        topLeft: DocumentPoint(80, 70),
+        topRight: DocumentPoint(920, 70),
+        bottomRight: DocumentPoint(900, 1400),
+        bottomLeft: DocumentPoint(90, 1400),
+      );
+      await manager.updateDocumentCornersAt(0, adjustedCorners);
+
+      manager.close();
+      manager = ScanSessionManager(
+        storage: AppPrivateSessionStorage(
+          appPrivateDirectoryProvider: () async => testRoot,
+        ),
+      );
+      final recovered = (await manager.findRecoverableSessions()).single;
+      expect(recovered.pages.single.documentCorners?.bottomRight.x, 900);
+      expect(recovered.pages.single.documentCorners?.bottomRight.y, 1400);
+    },
+  );
+
+  test('keeps the captured page when document detection throws', () async {
+    manager.close();
+    manager = ScanSessionManager(
+      storage: AppPrivateSessionStorage(
+        appPrivateDirectoryProvider: () async => testRoot,
+      ),
+      documentDetector: const _FailingDocumentDetector(),
+      sessionIdGenerator: () => 'failed-detection-session',
+    );
+    final capture = await _createCapture(testRoot, 'undetected.jpg');
+
+    final page = await manager.addRawCapture(capture.path);
+
+    expect(manager.pageCount, 1);
+    expect(page.documentCorners, isNull);
+    expect(await File(page.rawImagePath).exists(), isTrue);
+  });
 }
 
 Future<File> _createCapture(Directory root, String name) async {
   final capture = File(path.join(root.path, name));
   return capture.writeAsBytes([1, 2, 3]);
+}
+
+class _SuccessfulDocumentDetector implements DocumentDetector {
+  const _SuccessfulDocumentDetector();
+
+  @override
+  Future<DocumentDetectionResult> detect(String imagePath) async {
+    return const DocumentDetectionResult(
+      detected: true,
+      confidence: 0.9,
+      sourceWidth: 1000,
+      sourceHeight: 1500,
+      corners: DocumentCorners(
+        topLeft: DocumentPoint(50, 50),
+        topRight: DocumentPoint(950, 50),
+        bottomRight: DocumentPoint(950, 1450),
+        bottomLeft: DocumentPoint(50, 1450),
+      ),
+    );
+  }
+}
+
+class _FailingDocumentDetector implements DocumentDetector {
+  const _FailingDocumentDetector();
+
+  @override
+  Future<DocumentDetectionResult> detect(String imagePath) {
+    throw StateError('Detection failed.');
+  }
 }

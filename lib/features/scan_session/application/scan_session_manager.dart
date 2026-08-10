@@ -3,6 +3,8 @@ import 'package:uuid/uuid.dart';
 
 import 'package:scana/models/scan_page.dart';
 import 'package:scana/models/scan_session.dart';
+import 'package:scana/models/document_detection_result.dart';
+import 'package:scana/services/image_processing/document_detector.dart';
 import 'package:scana/services/storage/scan_session_storage.dart';
 
 typedef SessionIdGenerator = String Function();
@@ -19,11 +21,13 @@ abstract interface class ScanSessionCleanup {
 class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
   factory ScanSessionManager({
     required ScanSessionStorage storage,
+    DocumentDetector documentDetector = const NoOpDocumentDetector(),
     SessionIdGenerator sessionIdGenerator = _newUuid,
     Clock clock = DateTime.now,
   }) {
     return ScanSessionManager._(
       storage: storage,
+      documentDetector: documentDetector,
       sessionIdGenerator: sessionIdGenerator,
       clock: clock,
     );
@@ -31,11 +35,13 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
 
   ScanSessionManager._({
     required this._storage,
+    required this._documentDetector,
     required this._sessionIdGenerator,
     required this._clock,
   });
 
   final ScanSessionStorage _storage;
+  final DocumentDetector _documentDetector;
   final SessionIdGenerator _sessionIdGenerator;
   final Clock _clock;
 
@@ -85,7 +91,8 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
     session.addPage(page);
     await _storage.saveSession(session);
     notifyListeners();
-    return page;
+    await _detectPage(session, session.pages.length - 1);
+    return session.pages.last;
   }
 
   Future<void> deletePageAt(int index) async {
@@ -112,6 +119,22 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
     session.rotatePageAt(index);
     await _storage.saveSession(session);
     notifyListeners();
+  }
+
+  Future<void> updateDocumentCornersAt(
+    int index,
+    DocumentCorners corners,
+  ) async {
+    _ensureOpen();
+    final session = _requireSession();
+    session.updateDocumentCornersAt(index, corners);
+    await _storage.saveSession(session);
+    notifyListeners();
+  }
+
+  Future<bool> detectPageAt(int index) async {
+    _ensureOpen();
+    return _detectPage(_requireSession(), index);
   }
 
   @override
@@ -162,6 +185,20 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
       throw StateError('No active scan session.');
     }
     return session;
+  }
+
+  Future<bool> _detectPage(ScanSession session, int index) async {
+    try {
+      final detection = await _documentDetector.detect(
+        session.pages[index].rawImagePath,
+      );
+      session.updateDetectionAt(index, detection);
+      await _storage.saveSession(session);
+      notifyListeners();
+      return detection.detected;
+    } on Object {
+      return false;
+    }
   }
 
   void _ensureOpen() {

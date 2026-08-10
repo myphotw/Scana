@@ -3,6 +3,7 @@ import 'package:flutter/widgets.dart';
 import 'package:scana/app.dart';
 import 'package:scana/features/scan_session/application/scan_session_manager.dart';
 import 'package:scana/services/camera/camera_session.dart';
+import 'package:scana/services/image_processing/document_detector.dart';
 import 'package:scana/services/storage/scan_session_storage.dart';
 
 Future<void> main() async {
@@ -10,6 +11,7 @@ Future<void> main() async {
 
   final sessionManager = ScanSessionManager(
     storage: AppPrivateSessionStorage(),
+    documentDetector: const OpenCvDocumentDetector(),
   );
   final recoverableSessions = await sessionManager.findRecoverableSessions();
   final cameraStartup = await CameraSession.initializeDefault();

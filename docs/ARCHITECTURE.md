@@ -6,17 +6,27 @@
 
 ## 처리 흐름
 
-카메라 프리뷰 → 촬영 가이드 → ScanSession → 원본 저장 → 페이지 편집 → 문서 검출 → 원근 보정 → 곡면 보정 → 화질 보정 → 보정본 저장 → PDF 편집 → OCR 제목 추천 → PDF 생성 → 사용자 지정 위치 저장
+카메라 프리뷰 → 촬영 가이드 → ScanSession → 원본 저장 → 문서 검출 → 페이지 편집 → 원근 보정 → 곡면 보정 → 화질 보정 → 보정본 저장 → PDF 편집 → OCR 제목 추천 → PDF 생성 → 사용자 지정 위치 저장
 
 촬영 직후 PDF를 만들지 않는다. 원본과 각 보정 단계의 결과를 분리해 재편집과 재촬영을 지원한다.
 
 ## ScanSession 영속화
 
 - 작업 파일은 앱 전용 영속 디렉터리의 `scan_sessions/<session_uuid>/`에 저장한다.
-- `session.json`에는 Session ID, 생성 시간, 페이지 배열 순서, 원본 파일명, 페이지 번호, 생성 시간, 회전 메타데이터를 저장한다.
+- `session.json`에는 Session ID, 생성 시간, 페이지 배열 순서, 원본 파일명, 페이지 번호, 생성 시간, 회전, 원본 크기와 선택적 문서 모서리 좌표를 저장한다.
 - JSON에는 절대 경로를 기록하지 않는다. 런타임에 Session 디렉터리와 상대 파일명을 결합한다.
 - Recovery는 `session.json`을 우선 사용하고, 없거나 손상된 경우에만 `raw_*.jpg`를 탐색해 복구한다.
 - 취소와 향후 PDF 저장 성공 시에만 Session 디렉터리를 삭제한다.
+
+## 문서 검출 계층
+
+- Flutter의 `DocumentDetector` 계약은 Camera와 Page Editor UI에서 독립적이다.
+- Android 구현은 MethodChannel 뒤의 OpenCV Java API를 사용하며 전용 background executor에서 처리한다.
+- 고해상도 원본은 보존하고 최대 변 1400px의 처리용 Mat으로 축소한다.
+- Grayscale → Gaussian Blur → Canny → Morphological Close → Contour → Polygon Approximation 순서로 후보를 생성한다.
+- 후보는 사각형, convex, 최소 면적, 비정상 비율, 직각성, bounding rectangularity, 화면 가장자리 관계를 조합해 평가한다.
+- 결과 좌표는 원본 이미지 픽셀 좌표로 환산하며 순서는 top-left → top-right → bottom-right → bottom-left로 고정한다.
+- 실패는 정상 결과로 취급하고 Page Editor에서 기본 네 점을 수동 조정할 수 있다.
 
 ## 폴더 책임
 

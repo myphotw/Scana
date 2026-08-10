@@ -1,4 +1,5 @@
 import 'package:scana/models/scan_page.dart';
+import 'package:scana/models/document_detection_result.dart';
 
 /// Groups the raw pages that belong to one scanning operation.
 class ScanSession {
@@ -28,6 +29,14 @@ class ScanSession {
 
   void rotatePageAt(int index) {
     _pages[index] = _pages[index].rotateClockwise();
+  }
+
+  void updateDetectionAt(int index, DocumentDetectionResult detection) {
+    _pages[index] = _pages[index].withDetection(detection);
+  }
+
+  void updateDocumentCornersAt(int index, DocumentCorners corners) {
+    _pages[index] = _pages[index].withDocumentCorners(corners);
   }
 
   void _renumberPages() {

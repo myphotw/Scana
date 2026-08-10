@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'package:scana/models/scan_page.dart';
 import 'package:scana/models/scan_session.dart';
+import 'package:scana/models/document_detection_result.dart';
 
 typedef AppPrivateDirectoryProvider = Future<Directory> Function();
 
@@ -61,6 +62,12 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
               'rawImageFile': path.basename(page.rawImagePath),
               'createdTime': page.createdTime.toIso8601String(),
               'rotation': page.rotation,
+              if (page.documentSourceWidth != null)
+                'documentSourceWidth': page.documentSourceWidth!,
+              if (page.documentSourceHeight != null)
+                'documentSourceHeight': page.documentSourceHeight!,
+              if (page.documentCorners != null)
+                'documentCorners': page.documentCorners!.toJson(),
             },
           )
           .toList(),
@@ -130,11 +137,16 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
           pageData['createdTime'] as String? ?? '',
         );
         final rotation = pageData['rotation'] as int?;
+        final sourceWidth = pageData['documentSourceWidth'] as int?;
+        final sourceHeight = pageData['documentSourceHeight'] as int?;
+        final cornersValue = pageData['documentCorners'];
+        final documentCorners = DocumentCorners.fromJson(cornersValue);
         if (pageNo == null ||
             rawImageFile == null ||
             !_isRelativeFileName(rawImageFile) ||
             pageCreatedTime == null ||
-            !_isValidRotation(rotation)) {
+            !_isValidRotation(rotation) ||
+            (cornersValue != null && documentCorners == null)) {
           return null;
         }
 
@@ -148,6 +160,9 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
             rawImagePath: rawImagePath,
             createdTime: pageCreatedTime,
             rotation: rotation!,
+            documentCorners: documentCorners,
+            documentSourceWidth: sourceWidth,
+            documentSourceHeight: sourceHeight,
           ),
         );
       }
