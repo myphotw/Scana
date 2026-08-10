@@ -4,6 +4,7 @@ import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 
 import 'package:scana/features/scan_session/application/scan_session_manager.dart';
+import 'package:scana/models/scan_session.dart';
 import 'package:scana/services/camera/camera_session.dart';
 
 /// Full-screen camera entry point for the document scanning flow.
@@ -12,10 +13,12 @@ class CameraPreviewPage extends StatefulWidget {
     super.key,
     required this.sessionManager,
     this.cameraStartup,
+    this.recoverySession,
   });
 
   final CameraStartup? cameraStartup;
   final ScanSessionManager sessionManager;
+  final ScanSession? recoverySession;
 
   @override
   State<CameraPreviewPage> createState() => _CameraPreviewPageState();
@@ -23,6 +26,45 @@ class CameraPreviewPage extends StatefulWidget {
 
 class _CameraPreviewPageState extends State<CameraPreviewPage> {
   bool _isCapturing = false;
+  bool _recoveryPromptShown = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _showRecoveryPrompt());
+  }
+
+  Future<void> _showRecoveryPrompt() async {
+    final recoverySession = widget.recoverySession;
+    if (recoverySession == null || _recoveryPromptShown || !mounted) {
+      return;
+    }
+    _recoveryPromptShown = true;
+
+    final action = await showDialog<_RecoveryAction>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => _RecoveryDialog(session: recoverySession),
+    );
+    if (!mounted || action == null) {
+      return;
+    }
+
+    try {
+      switch (action) {
+        case _RecoveryAction.resume:
+          widget.sessionManager.restoreSession(recoverySession);
+        case _RecoveryAction.delete:
+          await widget.sessionManager.deleteRecoveredSession(recoverySession);
+      }
+    } on FileSystemException {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('이전 스캔 작업을 처리할 수 없습니다.')));
+      }
+    }
+  }
 
   Future<void> _capturePage() async {
     final cameraSession = widget.cameraStartup?.session;
@@ -156,6 +198,37 @@ class _CameraUnavailable extends StatelessWidget {
           textAlign: TextAlign.center,
         ),
       ),
+    );
+  }
+}
+
+enum _RecoveryAction { resume, delete }
+
+class _RecoveryDialog extends StatelessWidget {
+  const _RecoveryDialog({required this.session});
+
+  final ScanSession session;
+
+  @override
+  Widget build(BuildContext context) {
+    final localizations = MaterialLocalizations.of(context);
+    final createdTime =
+        '${localizations.formatMediumDate(session.createdTime)} '
+        '${localizations.formatTimeOfDay(TimeOfDay.fromDateTime(session.createdTime))}';
+
+    return AlertDialog(
+      title: const Text('이전 스캔 작업이 있습니다.'),
+      content: Text('생성 시간: $createdTime\n페이지 수: ${session.pages.length}'),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(_RecoveryAction.delete),
+          child: const Text('삭제 후 새 스캔'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(_RecoveryAction.resume),
+          child: const Text('이어하기'),
+        ),
+      ],
     );
   }
 }

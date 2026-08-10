@@ -4,7 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as path;
 
 import 'package:scana/features/scan_session/application/scan_session_manager.dart';
-import 'package:scana/services/storage/temporary_session_storage.dart';
+import 'package:scana/services/storage/scan_session_storage.dart';
 
 void main() {
   late Directory testRoot;
@@ -13,8 +13,8 @@ void main() {
   setUp(() async {
     testRoot = await Directory.systemTemp.createTemp('scana_session_test_');
     manager = ScanSessionManager(
-      storage: AppTemporarySessionStorage(
-        temporaryDirectoryProvider: () async => testRoot,
+      storage: AppPrivateSessionStorage(
+        appPrivateDirectoryProvider: () async => testRoot,
       ),
       sessionIdGenerator: () => 'session-uuid',
       clock: () => DateTime.utc(2026, 8, 10, 1, 2, 3),
@@ -35,7 +35,11 @@ void main() {
     final firstPage = await manager.addRawCapture(firstCapture.path);
     final secondPage = await manager.addRawCapture(secondCapture.path);
 
-    final expectedDirectory = path.join(testRoot.path, 'temp', 'session-uuid');
+    final expectedDirectory = path.join(
+      testRoot.path,
+      'scan_sessions',
+      'session-uuid',
+    );
     expect(manager.currentSession?.id, 'session-uuid');
     expect(manager.pageCount, 2);
     expect(firstPage.pageNo, 1);
@@ -56,7 +60,7 @@ void main() {
     final capture = await _createCapture(testRoot, 'capture.jpg');
     await manager.addRawCapture(capture.path);
     final sessionDirectory = Directory(
-      path.join(testRoot.path, 'temp', 'session-uuid'),
+      path.join(testRoot.path, 'scan_sessions', 'session-uuid'),
     );
 
     await manager.cancelSession();
@@ -77,7 +81,7 @@ void main() {
       expect(manager.currentSession, isNull);
       expect(
         await Directory(
-          path.join(testRoot.path, 'temp', 'session-uuid'),
+          path.join(testRoot.path, 'scan_sessions', 'session-uuid'),
         ).exists(),
         isFalse,
       );
@@ -88,12 +92,47 @@ void main() {
     final capture = await _createCapture(testRoot, 'capture.jpg');
     await manager.addRawCapture(capture.path);
     final sessionDirectory = Directory(
-      path.join(testRoot.path, 'temp', 'session-uuid'),
+      path.join(testRoot.path, 'scan_sessions', 'session-uuid'),
     );
 
     manager.close();
 
     expect(await sessionDirectory.exists(), isTrue);
+  });
+
+  test('finds and restores an existing temporary session', () async {
+    final sessionDirectory = Directory(
+      path.join(testRoot.path, 'scan_sessions', 'recovered-session'),
+    );
+    await sessionDirectory.create(recursive: true);
+    final secondPage = File(path.join(sessionDirectory.path, 'raw_002.jpg'));
+    final firstPage = File(path.join(sessionDirectory.path, 'raw_001.jpg'));
+    await secondPage.writeAsBytes([2]);
+    await firstPage.writeAsBytes([1]);
+
+    final recoverableSessions = await manager.findRecoverableSessions();
+
+    expect(recoverableSessions, hasLength(1));
+    expect(recoverableSessions.single.id, 'recovered-session');
+    expect(recoverableSessions.single.pages.map((page) => page.pageNo), [1, 2]);
+
+    manager.restoreSession(recoverableSessions.single);
+
+    expect(manager.currentSession?.id, 'recovered-session');
+    expect(manager.pageCount, 2);
+  });
+
+  test('deletes a recovered session before starting a new scan', () async {
+    final sessionDirectory = Directory(
+      path.join(testRoot.path, 'scan_sessions', 'recovered-session'),
+    );
+    await sessionDirectory.create(recursive: true);
+
+    final recoveredSession = (await manager.findRecoverableSessions()).single;
+    await manager.deleteRecoveredSession(recoveredSession);
+
+    expect(await sessionDirectory.exists(), isFalse);
+    expect(manager.currentSession, isNull);
   });
 }
 

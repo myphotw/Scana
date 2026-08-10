@@ -3,7 +3,7 @@ import 'package:uuid/uuid.dart';
 
 import 'package:scana/models/scan_page.dart';
 import 'package:scana/models/scan_session.dart';
-import 'package:scana/services/storage/temporary_session_storage.dart';
+import 'package:scana/services/storage/scan_session_storage.dart';
 
 typedef SessionIdGenerator = String Function();
 typedef Clock = DateTime Function();
@@ -18,7 +18,7 @@ abstract interface class ScanSessionCleanup {
 /// Creates a session on the first capture and owns its ordered raw pages.
 class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
   factory ScanSessionManager({
-    required TemporarySessionStorage storage,
+    required ScanSessionStorage storage,
     SessionIdGenerator sessionIdGenerator = _newUuid,
     Clock clock = DateTime.now,
   }) {
@@ -35,7 +35,7 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
     required this._clock,
   });
 
-  final TemporarySessionStorage _storage;
+  final ScanSessionStorage _storage;
   final SessionIdGenerator _sessionIdGenerator;
   final Clock _clock;
 
@@ -44,6 +44,29 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
 
   ScanSession? get currentSession => _currentSession;
   int get pageCount => _currentSession?.pages.length ?? 0;
+
+  Future<List<ScanSession>> findRecoverableSessions() {
+    _ensureOpen();
+    return _storage.findRecoverableSessions();
+  }
+
+  void restoreSession(ScanSession session) {
+    _ensureOpen();
+    if (_currentSession != null) {
+      throw StateError('A scan session is already active.');
+    }
+    _currentSession = session;
+    notifyListeners();
+  }
+
+  Future<void> deleteRecoveredSession(ScanSession session) async {
+    _ensureOpen();
+    if (_currentSession?.id == session.id) {
+      await cancelSession();
+      return;
+    }
+    await _storage.deleteSession(session.id);
+  }
 
   Future<ScanPage> addRawCapture(String capturedImagePath) async {
     _ensureOpen();

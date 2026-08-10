@@ -5,15 +5,22 @@ import 'package:flutter/services.dart';
 
 import 'package:scana/features/camera/presentation/camera_preview_page.dart';
 import 'package:scana/features/scan_session/application/scan_session_manager.dart';
+import 'package:scana/models/scan_session.dart';
 import 'package:scana/services/camera/camera_session.dart';
-import 'package:scana/services/storage/temporary_session_storage.dart';
+import 'package:scana/services/storage/scan_session_storage.dart';
 
 /// Root application shell for Scana.
 class ScanaApp extends StatefulWidget {
-  const ScanaApp({super.key, this.cameraStartup, this.sessionManager});
+  const ScanaApp({
+    super.key,
+    this.cameraStartup,
+    this.sessionManager,
+    this.recoverySession,
+  });
 
   final CameraStartup? cameraStartup;
   final ScanSessionManager? sessionManager;
+  final ScanSession? recoverySession;
 
   @override
   State<ScanaApp> createState() => _ScanaAppState();
@@ -27,7 +34,7 @@ class _ScanaAppState extends State<ScanaApp> {
     super.initState();
     _sessionManager =
         widget.sessionManager ??
-        ScanSessionManager(storage: AppTemporarySessionStorage());
+        ScanSessionManager(storage: AppPrivateSessionStorage());
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
   }
 
@@ -51,6 +58,7 @@ class _ScanaAppState extends State<ScanaApp> {
       home: CameraPreviewPage(
         cameraStartup: widget.cameraStartup,
         sessionManager: _sessionManager,
+        recoverySession: widget.recoverySession,
       ),
     );
   }

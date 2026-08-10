@@ -1,10 +1,23 @@
 import 'package:flutter/widgets.dart';
 
 import 'package:scana/app.dart';
+import 'package:scana/features/scan_session/application/scan_session_manager.dart';
 import 'package:scana/services/camera/camera_session.dart';
+import 'package:scana/services/storage/scan_session_storage.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  final sessionManager = ScanSessionManager(
+    storage: AppPrivateSessionStorage(),
+  );
+  final recoverableSessions = await sessionManager.findRecoverableSessions();
   final cameraStartup = await CameraSession.initializeDefault();
-  runApp(ScanaApp(cameraStartup: cameraStartup));
+  runApp(
+    ScanaApp(
+      cameraStartup: cameraStartup,
+      sessionManager: sessionManager,
+      recoverySession: recoverableSessions.firstOrNull,
+    ),
+  );
 }

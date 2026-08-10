@@ -13,4 +13,8 @@ class ScanSession {
   void addPage(ScanPage page) {
     _pages.add(page);
   }
+
+  void sortPages() {
+    _pages.sort((first, second) => first.pageNo.compareTo(second.pageNo));
+  }
 }
