@@ -1,7 +1,10 @@
-﻿import 'package:flutter/widgets.dart';
+import 'package:flutter/widgets.dart';
 
 import 'package:scana/app.dart';
+import 'package:scana/services/camera/camera_session.dart';
 
-void main() {
-  runApp(const ScanaApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final cameraStartup = await CameraSession.initializeDefault();
+  runApp(ScanaApp(cameraStartup: cameraStartup));
 }
