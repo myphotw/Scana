@@ -6,7 +6,13 @@ import 'package:path/path.dart' as path;
 
 import 'package:scana/features/scan_session/application/scan_session_manager.dart';
 import 'package:scana/models/document_detection_result.dart';
+import 'package:scana/models/page_correction.dart';
+import 'package:scana/models/page_boundary.dart';
+import 'package:scana/models/scan_page.dart';
+import 'package:scana/models/scan_capture_mode.dart';
 import 'package:scana/services/image_processing/document_detector.dart';
+import 'package:scana/services/image_processing/page_corrector.dart';
+import 'package:scana/services/image_processing/spread_capture_splitter.dart';
 import 'package:scana/services/storage/scan_session_storage.dart';
 
 void main() {
@@ -83,6 +89,25 @@ void main() {
     expect(manager.pageCount, 0);
     expect(await sessionDirectory.exists(), isFalse);
   });
+
+  test(
+    'deleting the last page keeps the session ready for another capture',
+    () async {
+      await manager.addRawCapture(
+        (await _createCapture(testRoot, 'only-page.jpg')).path,
+      );
+
+      await manager.deletePageAt(0);
+
+      expect(manager.currentSession?.id, 'session-uuid');
+      expect(manager.pageCount, 0);
+      final next = await manager.addRawCapture(
+        (await _createCapture(testRoot, 'next-page.jpg')).path,
+      );
+      expect(next.pageNo, 1);
+      expect(manager.currentSession?.id, 'session-uuid');
+    },
+  );
 
   test(
     'successful export cleanup uses the session deletion contract',
@@ -242,6 +267,10 @@ void main() {
         'raw_001.jpg',
       ]);
       expect(session.pages.first.rotation, 90);
+      expect(session.pages.first.correctedImagePath, isNull);
+      expect(session.pages.first.correctionStatus, CorrectionStatus.none);
+      expect(session.pages.first.correctionType, CorrectionType.perspective);
+      expect(session.pages.first.pageBoundary, isNull);
     },
   );
 
@@ -266,6 +295,39 @@ void main() {
       expect(session.pages.single.rotation, 0);
     },
   );
+
+  test('recovers interrupted or missing correction output as failed', () async {
+    final sessionDirectory = Directory(
+      path.join(testRoot.path, 'scan_sessions', 'interrupted-session'),
+    );
+    await sessionDirectory.create(recursive: true);
+    await File(
+      path.join(sessionDirectory.path, 'raw_001.jpg'),
+    ).writeAsBytes([1]);
+    await File(path.join(sessionDirectory.path, 'session.json')).writeAsString(
+      jsonEncode({
+        'id': 'interrupted-session',
+        'createdTime': '2026-08-10T01:02:03.000Z',
+        'pages': [
+          {
+            'pageNo': 1,
+            'rawImageFile': 'raw_001.jpg',
+            'correctedImageFile': 'corrected_001.jpg',
+            'createdTime': '2026-08-10T01:02:04.000Z',
+            'rotation': 0,
+            'correctionStatus': 'processing',
+            'correctionType': 'perspective',
+          },
+        ],
+      }),
+    );
+
+    final recovered = (await manager.findRecoverableSessions()).single;
+
+    expect(recovered.pages.single.correctionStatus, CorrectionStatus.failed);
+    expect(recovered.pages.single.correctedImagePath, isNull);
+    expect(await File(recovered.pages.single.rawImagePath).exists(), isTrue);
+  });
 
   test(
     'stores detected document corners and restores them from metadata',
@@ -324,7 +386,629 @@ void main() {
     expect(page.documentCorners, isNull);
     expect(await File(page.rawImagePath).exists(), isTrue);
   });
+
+  test(
+    'stores capture-guide corners and persists user corner priority',
+    () async {
+      manager.close();
+      manager = ScanSessionManager(
+        storage: AppPrivateSessionStorage(
+          appPrivateDirectoryProvider: () async => testRoot,
+        ),
+        documentDetector: const _SuccessfulDocumentDetector(),
+        sessionIdGenerator: () => 'guide-session',
+      );
+      final capture = await _createCapture(testRoot, 'guide.jpg');
+      final page = await manager.addRawCapture(
+        capture.path,
+        captureGuideRegion: const CaptureGuideRegion(
+          left: 0.1,
+          top: 0.2,
+          right: 0.9,
+          bottom: 0.8,
+        ),
+      );
+
+      expect(page.captureGuideCorners?.topLeft.x, 100);
+      expect(page.captureGuideCorners?.topLeft.y, 300);
+      expect(page.captureGuideCorners?.bottomRight.x, 900);
+      expect(page.captureGuideCorners?.bottomRight.y, 1200);
+      expect(page.hasUserAdjustedCorners, isFalse);
+
+      const adjusted = DocumentCorners(
+        topLeft: DocumentPoint(80, 80),
+        topRight: DocumentPoint(920, 80),
+        bottomRight: DocumentPoint(920, 1400),
+        bottomLeft: DocumentPoint(80, 1400),
+      );
+      await manager.updateDocumentCornersAt(0, adjusted);
+      manager.close();
+      manager = ScanSessionManager(
+        storage: AppPrivateSessionStorage(
+          appPrivateDirectoryProvider: () async => testRoot,
+        ),
+      );
+
+      final recovered =
+          (await manager.findRecoverableSessions()).single.pages.single;
+      expect(recovered.hasUserAdjustedCorners, isTrue);
+      expect(recovered.documentCorners?.topLeft.x, 80);
+      expect(recovered.captureGuideCorners?.bottomRight.y, 1200);
+    },
+  );
+
+  test(
+    'capture processing automatically creates a Perspective scan result',
+    () async {
+      manager.close();
+      manager = ScanSessionManager(
+        storage: AppPrivateSessionStorage(
+          appPrivateDirectoryProvider: () async => testRoot,
+        ),
+        documentDetector: const _SuccessfulDocumentDetector(),
+        pageCorrector: const _SuccessfulPageCorrector(),
+        sessionIdGenerator: () => 'automatic-correction-session',
+      );
+      final capture = await _createCapture(testRoot, 'automatic.jpg');
+
+      final page = await manager.captureAndProcess(capture.path);
+
+      expect(page.correctionStatus, CorrectionStatus.completed);
+      expect(page.correctionType, CorrectionType.perspective);
+      expect(page.correctedImagePath, isNotNull);
+      expect(await File(page.correctedImagePath!).exists(), isTrue);
+    },
+  );
+
+  test(
+    'retake replaces a page only after the new scan result is confirmed',
+    () async {
+      manager.close();
+      manager = ScanSessionManager(
+        storage: AppPrivateSessionStorage(
+          appPrivateDirectoryProvider: () async => testRoot,
+        ),
+        documentDetector: const _SuccessfulDocumentDetector(),
+        pageCorrector: const _SuccessfulPageCorrector(),
+        sessionIdGenerator: () => 'retake-session',
+      );
+      final initialCapture = await _createCapture(testRoot, 'initial.jpg');
+      final initial = await manager.captureAndProcess(initialCapture.path);
+      final oldRawPath = initial.rawImagePath;
+      final oldCorrectedPath = initial.correctedImagePath!;
+      final retake = await _createCapture(testRoot, 'retake.jpg');
+
+      final replaced = await manager.replacePageAt(0, retake.path);
+      final replacement = manager.currentSession!.pages.single;
+
+      expect(replaced, isTrue);
+      expect(manager.pageCount, 1);
+      expect(replacement.pageNo, 1);
+      expect(replacement.rawImagePath, isNot(oldRawPath));
+      expect(replacement.correctedImagePath, isNotNull);
+      expect(await File(oldRawPath).exists(), isFalse);
+      expect(await File(oldCorrectedPath).exists(), isFalse);
+      expect(await File(replacement.rawImagePath).exists(), isTrue);
+      expect(await File(replacement.correctedImagePath!).exists(), isTrue);
+    },
+  );
+
+  test('failed retake leaves the previous confirmed page intact', () async {
+    manager.close();
+    final storage = AppPrivateSessionStorage(
+      appPrivateDirectoryProvider: () async => testRoot,
+    );
+    manager = ScanSessionManager(
+      storage: storage,
+      documentDetector: const _SuccessfulDocumentDetector(),
+      pageCorrector: const _SuccessfulPageCorrector(),
+      sessionIdGenerator: () => 'failed-retake-session',
+    );
+    final initialCapture = await _createCapture(testRoot, 'initial.jpg');
+    final initial = await manager.captureAndProcess(initialCapture.path);
+
+    manager.close();
+    manager = ScanSessionManager(
+      storage: storage,
+      documentDetector: const _SuccessfulDocumentDetector(),
+      pageCorrector: const _FailingPageCorrector(),
+    );
+    manager.restoreSession((await manager.findRecoverableSessions()).single);
+    final retake = await _createCapture(testRoot, 'failed-retake.jpg');
+
+    final replaced = await manager.replacePageAt(0, retake.path);
+    final page = manager.currentSession!.pages.single;
+
+    expect(replaced, isFalse);
+    expect(page.rawImagePath, initial.rawImagePath);
+    expect(page.correctedImagePath, initial.correctedImagePath);
+    expect(await File(initial.rawImagePath).exists(), isTrue);
+    expect(await File(initial.correctedImagePath!).exists(), isTrue);
+  });
+
+  test('persists and recovers a completed corrected image', () async {
+    manager.close();
+    manager = ScanSessionManager(
+      storage: AppPrivateSessionStorage(
+        appPrivateDirectoryProvider: () async => testRoot,
+      ),
+      documentDetector: const _SuccessfulDocumentDetector(),
+      pageCorrector: const _SuccessfulPageCorrector(),
+      sessionIdGenerator: () => 'correction-session',
+      clock: () => DateTime.utc(2026, 8, 10, 1, 2, 3),
+    );
+    final capture = await _createCapture(testRoot, 'correction.jpg');
+    await manager.addRawCapture(capture.path);
+
+    final succeeded = await manager.correctPageAt(
+      0,
+      CorrectionType.perspective,
+    );
+
+    final correctedPath =
+        manager.currentSession!.pages.single.correctedImagePath;
+    expect(succeeded, isTrue);
+    expect(correctedPath, isNotNull);
+    expect(path.basename(correctedPath!), 'corrected_001.jpg');
+    expect(await File(correctedPath).exists(), isTrue);
+    expect(
+      manager.currentSession!.pages.single.correctionStatus,
+      CorrectionStatus.completed,
+    );
+
+    final metadataFile = File(
+      path.join(
+        testRoot.path,
+        'scan_sessions',
+        'correction-session',
+        'session.json',
+      ),
+    );
+    final metadata = jsonDecode(await metadataFile.readAsString()) as Map;
+    final pageMetadata = (metadata['pages'] as List).single as Map;
+    expect(pageMetadata['correctedImageFile'], 'corrected_001.jpg');
+    expect(
+      path.isAbsolute(pageMetadata['correctedImageFile'] as String),
+      isFalse,
+    );
+    expect(pageMetadata['correctionStatus'], 'completed');
+    expect(pageMetadata['correctionType'], 'perspective');
+
+    manager.close();
+    manager = ScanSessionManager(
+      storage: AppPrivateSessionStorage(
+        appPrivateDirectoryProvider: () async => testRoot,
+      ),
+    );
+    final recovered = (await manager.findRecoverableSessions()).single;
+    expect(recovered.pages.single.correctedImagePath, correctedPath);
+    expect(recovered.pages.single.correctionStatus, CorrectionStatus.completed);
+  });
+
+  test('failed retry keeps raw and the previous corrected image', () async {
+    manager.close();
+    final storage = AppPrivateSessionStorage(
+      appPrivateDirectoryProvider: () async => testRoot,
+    );
+    manager = ScanSessionManager(
+      storage: storage,
+      documentDetector: const _SuccessfulDocumentDetector(),
+      pageCorrector: const _SuccessfulPageCorrector(),
+      sessionIdGenerator: () => 'retry-session',
+    );
+    final capture = await _createCapture(testRoot, 'retry.jpg');
+    await manager.addRawCapture(capture.path);
+    await manager.correctPageAt(0, CorrectionType.perspective);
+    final previousPage = manager.currentSession!.pages.single;
+    final previousCorrectedPath = previousPage.correctedImagePath!;
+
+    manager.close();
+    manager = ScanSessionManager(
+      storage: storage,
+      pageCorrector: const _FailingPageCorrector(),
+    );
+    manager.restoreSession((await manager.findRecoverableSessions()).single);
+    final succeeded = await manager.correctPageAt(
+      0,
+      CorrectionType.perspective,
+    );
+    final failedPage = manager.currentSession!.pages.single;
+
+    expect(succeeded, isFalse);
+    expect(failedPage.correctionStatus, CorrectionStatus.failed);
+    expect(failedPage.correctionType, CorrectionType.perspective);
+    expect(failedPage.correctedImagePath, previousCorrectedPath);
+    expect(await File(failedPage.rawImagePath).exists(), isTrue);
+    expect(await File(previousCorrectedPath).exists(), isTrue);
+  });
+
+  test(
+    'curved failure protects the newly generated perspective result',
+    () async {
+      manager.close();
+      final corrector = _CurveStageFailingPageCorrector();
+      manager = ScanSessionManager(
+        storage: AppPrivateSessionStorage(
+          appPrivateDirectoryProvider: () async => testRoot,
+        ),
+        documentDetector: const _SuccessfulDocumentDetector(),
+        pageCorrector: corrector,
+        sessionIdGenerator: () => 'protected-perspective-session',
+      );
+      final capture = await _createCapture(testRoot, 'book-page.jpg');
+      await manager.addRawCapture(capture.path);
+
+      final succeeded = await manager.correctPageAt(0, CorrectionType.curved);
+      final page = manager.currentSession!.pages.single;
+
+      expect(succeeded, isFalse);
+      expect(corrector.calls, [
+        CorrectionType.perspective,
+        CorrectionType.curved,
+      ]);
+      expect(page.correctionStatus, CorrectionStatus.failed);
+      expect(page.correctionType, CorrectionType.curved);
+      expect(path.basename(page.correctedImagePath!), 'corrected_001.jpg');
+      expect(await File(page.correctedImagePath!).exists(), isTrue);
+      expect(await File(page.rawImagePath).exists(), isTrue);
+
+      manager.close();
+      manager = ScanSessionManager(
+        storage: AppPrivateSessionStorage(
+          appPrivateDirectoryProvider: () async => testRoot,
+        ),
+      );
+      final recovered = (await manager.findRecoverableSessions()).single;
+      expect(
+        recovered.pages.single.correctedImagePath,
+        page.correctedImagePath,
+      );
+      expect(recovered.pages.single.correctionStatus, CorrectionStatus.failed);
+    },
+  );
+
+  test(
+    'page deletion removes raw, correction variants, and pending output',
+    () async {
+      manager.close();
+      manager = ScanSessionManager(
+        storage: AppPrivateSessionStorage(
+          appPrivateDirectoryProvider: () async => testRoot,
+        ),
+        documentDetector: const _SuccessfulDocumentDetector(),
+        pageCorrector: const _SuccessfulPageCorrector(),
+        sessionIdGenerator: () => 'delete-correction-session',
+      );
+      final capture = await _createCapture(testRoot, 'delete-correction.jpg');
+      await manager.addRawCapture(capture.path);
+      final rawPath = manager.currentSession!.pages.single.rawImagePath;
+      await manager.correctPageAt(0, CorrectionType.perspective);
+      final perspectivePath =
+          manager.currentSession!.pages.single.correctedImagePath!;
+      await manager.correctPageAt(0, CorrectionType.curved);
+      final curvedPath =
+          manager.currentSession!.pages.single.correctedImagePath!;
+      final pendingPath = path.join(
+        path.dirname(rawPath),
+        '.corrected_001.jpg.pending.jpg',
+      );
+      await File(pendingPath).writeAsBytes([9]);
+
+      await manager.deletePageAt(0);
+
+      expect(await File(rawPath).exists(), isFalse);
+      expect(await File(perspectivePath).exists(), isFalse);
+      expect(await File(curvedPath).exists(), isFalse);
+      expect(await File(pendingPath).exists(), isFalse);
+      expect(manager.pageCount, 0);
+    },
+  );
+
+  test(
+    'uses stable preview corners when high-resolution confidence is low',
+    () async {
+      manager.close();
+      manager = ScanSessionManager(
+        storage: AppPrivateSessionStorage(
+          appPrivateDirectoryProvider: () async => testRoot,
+        ),
+        documentDetector: const _LowConfidenceDocumentDetector(),
+        sessionIdGenerator: () => 'preview-fallback-session',
+      );
+      final capture = await _createCapture(testRoot, 'preview-fallback.jpg');
+      const preview = DocumentCorners(
+        topLeft: DocumentPoint(0.1, 0.1),
+        topRight: DocumentPoint(0.9, 0.1),
+        bottomRight: DocumentPoint(0.9, 0.9),
+        bottomLeft: DocumentPoint(0.1, 0.9),
+      );
+      final previewBoundary = _previewBoundary();
+
+      final page = await manager.addRawCapture(
+        capture.path,
+        stablePreviewCorners: preview,
+        stablePreviewBoundary: previewBoundary,
+        captureGuideRegion: const CaptureGuideRegion(
+          left: 0.2,
+          top: 0.2,
+          right: 0.8,
+          bottom: 0.8,
+        ),
+      );
+
+      expect(page.documentCorners!.topLeft.x, 100);
+      expect(page.documentCorners!.topLeft.y, 150);
+      expect(page.captureGuideCorners!.topLeft.x, 200);
+      expect(page.pageBoundary, isNotNull);
+      expect(page.pageBoundary!.top, hasLength(3));
+
+      manager.close();
+      manager = ScanSessionManager(
+        storage: AppPrivateSessionStorage(
+          appPrivateDirectoryProvider: () async => testRoot,
+        ),
+      );
+      final recovered = (await manager.findRecoverableSessions()).single;
+      expect(recovered.pages.single.pageBoundary!.top, hasLength(3));
+      expect(recovered.pages.single.pageBoundary!.sourceWidth, 1000);
+      expect(
+        recovered.pages.single.pageBoundary!.spineSide,
+        PageBoundarySide.left,
+      );
+    },
+  );
+
+  test('rotation cycles through all right-angle states', () async {
+    final capture = await _createCapture(testRoot, 'rotation-cycle.jpg');
+    await manager.addRawCapture(capture.path);
+
+    for (final expected in const [90, 180, 270, 0]) {
+      await manager.rotatePageAt(0);
+      expect(manager.currentSession!.pages.single.rotation, expected);
+    }
+  });
+
+  test(
+    'prefers a reliable high-resolution boundary over live preview',
+    () async {
+      manager.close();
+      manager = ScanSessionManager(
+        storage: AppPrivateSessionStorage(
+          appPrivateDirectoryProvider: () async => testRoot,
+        ),
+        documentDetector: const _BoundaryDocumentDetector(),
+        sessionIdGenerator: () => 'high-resolution-boundary-session',
+      );
+      final capture = await _createCapture(testRoot, 'high-boundary.jpg');
+
+      final page = await manager.addRawCapture(
+        capture.path,
+        stablePreviewBoundary: _previewBoundary(),
+      );
+
+      expect(page.pageBoundary!.top.first.x, 50);
+      expect(page.documentCorners!.topLeft.x, 50);
+    },
+  );
+
+  test(
+    'passes page boundary into curved correction with baseline fallback available',
+    () async {
+      manager.close();
+      final corrector = _RecordingBoundaryCorrector();
+      manager = ScanSessionManager(
+        storage: AppPrivateSessionStorage(
+          appPrivateDirectoryProvider: () async => testRoot,
+        ),
+        documentDetector: const _LowConfidenceDocumentDetector(),
+        pageCorrector: corrector,
+        sessionIdGenerator: () => 'boundary-curve-session',
+      );
+      final capture = await _createCapture(testRoot, 'boundary-curve.jpg');
+      await manager.addRawCapture(
+        capture.path,
+        stablePreviewBoundary: _previewBoundary(),
+      );
+
+      expect(await manager.correctPageAt(0, CorrectionType.curved), isTrue);
+      expect(corrector.boundaries, hasLength(2));
+      expect(
+        corrector.boundaries.every((boundary) => boundary != null),
+        isTrue,
+      );
+      expect(
+        corrector.boundaries.every(
+          (boundary) =>
+              boundary!.top.length >= 3 &&
+              boundary.bottom.length >= 3 &&
+              boundary.spineSide == PageBoundarySide.left,
+        ),
+        isTrue,
+      );
+    },
+  );
+
+  test(
+    'one spread capture creates left then right independent scan pages',
+    () async {
+      manager.close();
+      manager = _spreadManager(testRoot);
+      await manager.setCaptureMode(ScanCaptureMode.spread);
+      final capture = await _createCapture(testRoot, 'spread.jpg');
+
+      final pages = await manager.captureAndProcessSpread(capture.path);
+
+      expect(pages.map((page) => page.pageNo), [1, 2]);
+      expect(manager.currentSession!.captureMode, ScanCaptureMode.spread);
+      expect(pages.map((page) => path.basename(page.rawImagePath)), [
+        'raw_001.jpg',
+        'raw_002.jpg',
+      ]);
+      expect(pages.every((page) => page.correctedImagePath != null), isTrue);
+      expect(await File(capture.path).exists(), isFalse);
+    },
+  );
+
+  test('continuous spread captures retain left-to-right page order', () async {
+    manager.close();
+    manager = _spreadManager(testRoot);
+    await manager.setCaptureMode(ScanCaptureMode.spread);
+
+    await manager.captureAndProcessSpread(
+      (await _createCapture(testRoot, 'spread_1.jpg')).path,
+    );
+    await manager.captureAndProcessSpread(
+      (await _createCapture(testRoot, 'spread_2.jpg')).path,
+    );
+
+    expect(manager.currentSession!.pages.map((page) => page.pageNo), [
+      1,
+      2,
+      3,
+      4,
+    ]);
+    expect(
+      manager.currentSession!.pages.map(
+        (page) => path.basename(page.rawImagePath),
+      ),
+      ['raw_001.jpg', 'raw_002.jpg', 'raw_003.jpg', 'raw_004.jpg'],
+    );
+  });
+
+  test(
+    'spread capture passes each ROI side to a spread-aware detector',
+    () async {
+      final detector = _RecordingSpreadAwareDocumentDetector();
+      manager.close();
+      manager = _spreadManager(testRoot, detector: detector);
+      await manager.setCaptureMode(ScanCaptureMode.spread);
+
+      await manager.captureAndProcessSpread(
+        (await _createCapture(testRoot, 'spread-side-policy.jpg')).path,
+      );
+
+      expect(detector.pageSides, [
+        DocumentPageSide.left,
+        DocumentPageSide.right,
+      ]);
+    },
+  );
+
+  test('right detection fallback keeps the left Perspective page', () async {
+    manager.close();
+    manager = _spreadManager(testRoot, detector: const _RightFailingDetector());
+    await manager.setCaptureMode(ScanCaptureMode.spread);
+
+    final pages = await manager.captureAndProcessSpread(
+      (await _createCapture(testRoot, 'one-side-failure.jpg')).path,
+    );
+
+    expect(pages, hasLength(2));
+    expect(pages[0].correctedImagePath, isNotNull);
+    expect(pages[0].spreadFallbackUsed, isFalse);
+    expect(pages[1].correctedImagePath, isNotNull);
+    expect(pages[1].spreadFallbackUsed, isTrue);
+    expect(await File(pages[1].rawImagePath).exists(), isTrue);
+  });
+
+  test('left detection fallback keeps the right Perspective page', () async {
+    manager.close();
+    manager = _spreadManager(testRoot, detector: const _LeftFailingDetector());
+    await manager.setCaptureMode(ScanCaptureMode.spread);
+
+    final pages = await manager.captureAndProcessSpread(
+      (await _createCapture(testRoot, 'left-side-failure.jpg')).path,
+    );
+
+    expect(pages, hasLength(2));
+    expect(pages[0].correctedImagePath, isNotNull);
+    expect(pages[0].spreadFallbackUsed, isTrue);
+    expect(pages[1].correctedImagePath, isNotNull);
+    expect(pages[1].spreadFallbackUsed, isFalse);
+  });
+
+  test('spread fallback usage survives session recovery', () async {
+    manager.close();
+    manager = _spreadManager(testRoot, detector: const _RightFailingDetector());
+    await manager.setCaptureMode(ScanCaptureMode.spread);
+    await manager.captureAndProcessSpread(
+      (await _createCapture(testRoot, 'recover-fallback.jpg')).path,
+    );
+    manager.close();
+
+    final recoveryManager = _spreadManager(testRoot);
+    addTearDown(recoveryManager.close);
+    final recovered = (await recoveryManager.findRecoverableSessions()).single;
+
+    expect(recovered.pages[0].spreadFallbackUsed, isFalse);
+    expect(recovered.pages[1].spreadFallbackUsed, isTrue);
+    expect(recovered.pages[1].correctedImagePath, isNotNull);
+  });
+
+  test('recovers the spread capture mode from session metadata', () async {
+    manager.close();
+    manager = _spreadManager(testRoot);
+    await manager.setCaptureMode(ScanCaptureMode.spread);
+    await manager.captureAndProcessSpread(
+      (await _createCapture(testRoot, 'recover-spread.jpg')).path,
+    );
+    manager.close();
+
+    final recoveryManager = _spreadManager(testRoot);
+    addTearDown(recoveryManager.close);
+    final recovered = (await recoveryManager.findRecoverableSessions()).single;
+    recoveryManager.restoreSession(recovered);
+
+    expect(recovered.captureMode, ScanCaptureMode.spread);
+    expect(recoveryManager.captureMode, ScanCaptureMode.spread);
+    expect(recovered.pages, hasLength(2));
+  });
 }
+
+ScanSessionManager _spreadManager(
+  Directory root, {
+  DocumentDetector detector = const _SuccessfulDocumentDetector(),
+  SpreadFallbackCropper fallbackCropper = const _TestSpreadFallbackCropper(),
+}) => ScanSessionManager(
+  storage: AppPrivateSessionStorage(
+    appPrivateDirectoryProvider: () async => root,
+  ),
+  documentDetector: detector,
+  pageCorrector: const _SuccessfulPageCorrector(),
+  spreadCaptureSplitter: const _TestSpreadCaptureSplitter(),
+  spreadFallbackCropper: fallbackCropper,
+  sessionIdGenerator: () => 'session-uuid',
+  clock: () => DateTime.utc(2026, 8, 10, 1, 2, 3),
+);
+
+PageBoundary _previewBoundary() => PageBoundary(
+  top: const [
+    DocumentPoint(0.1, 0.1),
+    DocumentPoint(0.5, 0.12),
+    DocumentPoint(0.9, 0.1),
+  ],
+  right: const [
+    DocumentPoint(0.9, 0.1),
+    DocumentPoint(0.91, 0.5),
+    DocumentPoint(0.9, 0.9),
+  ],
+  bottom: const [
+    DocumentPoint(0.9, 0.9),
+    DocumentPoint(0.5, 0.88),
+    DocumentPoint(0.1, 0.9),
+  ],
+  left: const [
+    DocumentPoint(0.1, 0.9),
+    DocumentPoint(0.09, 0.5),
+    DocumentPoint(0.1, 0.1),
+  ],
+  confidence: 0.8,
+  stability: 1,
+  sourceWidth: 1,
+  sourceHeight: 1,
+  timestamp: DateTime.utc(2026, 8, 10),
+  spineSide: PageBoundarySide.left,
+);
 
 Future<File> _createCapture(Directory root, String name) async {
   final capture = File(path.join(root.path, name));
@@ -351,11 +1035,226 @@ class _SuccessfulDocumentDetector implements DocumentDetector {
   }
 }
 
+class _RecordingSpreadAwareDocumentDetector
+    implements SpreadAwareDocumentDetector {
+  final List<DocumentPageSide> pageSides = [];
+
+  @override
+  Future<DocumentDetectionResult> detect(String imagePath) =>
+      const _SuccessfulDocumentDetector().detect(imagePath);
+
+  @override
+  Future<DocumentDetectionResult> detectForPage(
+    String imagePath, {
+    required DocumentPageSide pageSide,
+  }) {
+    pageSides.add(pageSide);
+    return const _SuccessfulDocumentDetector().detect(imagePath);
+  }
+}
+
+class _LowConfidenceDocumentDetector implements DocumentDetector {
+  const _LowConfidenceDocumentDetector();
+
+  @override
+  Future<DocumentDetectionResult> detect(String imagePath) async {
+    return const DocumentDetectionResult(
+      detected: false,
+      confidence: 0.2,
+      sourceWidth: 1000,
+      sourceHeight: 1500,
+    );
+  }
+}
+
+class _BoundaryDocumentDetector implements DocumentDetector {
+  const _BoundaryDocumentDetector();
+
+  @override
+  Future<DocumentDetectionResult> detect(String imagePath) async {
+    final boundary = PageBoundary(
+      top: const [
+        DocumentPoint(50, 50),
+        DocumentPoint(500, 65),
+        DocumentPoint(950, 50),
+      ],
+      right: const [
+        DocumentPoint(950, 50),
+        DocumentPoint(955, 750),
+        DocumentPoint(950, 1450),
+      ],
+      bottom: const [
+        DocumentPoint(950, 1450),
+        DocumentPoint(500, 1435),
+        DocumentPoint(50, 1450),
+      ],
+      left: const [
+        DocumentPoint(50, 1450),
+        DocumentPoint(45, 750),
+        DocumentPoint(50, 50),
+      ],
+      confidence: 0.9,
+      stability: 0,
+      sourceWidth: 1000,
+      sourceHeight: 1500,
+      timestamp: DateTime.utc(2026, 8, 10),
+    );
+    return DocumentDetectionResult(
+      detected: true,
+      confidence: 0.9,
+      sourceWidth: 1000,
+      sourceHeight: 1500,
+      corners: boundary.toDocumentCorners(),
+      boundary: boundary,
+    );
+  }
+}
+
 class _FailingDocumentDetector implements DocumentDetector {
   const _FailingDocumentDetector();
 
   @override
   Future<DocumentDetectionResult> detect(String imagePath) {
     throw StateError('Detection failed.');
+  }
+}
+
+class _RightFailingDetector implements DocumentDetector {
+  const _RightFailingDetector();
+
+  @override
+  Future<DocumentDetectionResult> detect(String imagePath) {
+    if (path.basename(imagePath) == 'raw_002.jpg') {
+      return Future.value(
+        const DocumentDetectionResult(
+          detected: false,
+          confidence: 0,
+          sourceWidth: 0,
+          sourceHeight: 0,
+        ),
+      );
+    }
+    return const _SuccessfulDocumentDetector().detect(imagePath);
+  }
+}
+
+class _LeftFailingDetector implements DocumentDetector {
+  const _LeftFailingDetector();
+
+  @override
+  Future<DocumentDetectionResult> detect(String imagePath) {
+    if (path.basename(imagePath) == 'raw_001.jpg') {
+      return Future.value(
+        const DocumentDetectionResult(
+          detected: false,
+          confidence: 0,
+          sourceWidth: 1000,
+          sourceHeight: 1500,
+        ),
+      );
+    }
+    return const _SuccessfulDocumentDetector().detect(imagePath);
+  }
+}
+
+class _TestSpreadCaptureSplitter implements SpreadCaptureSplitter {
+  const _TestSpreadCaptureSplitter();
+
+  @override
+  Future<SpreadCaptureParts> split(String capturedImagePath) async {
+    final source = File(capturedImagePath);
+    final left = File('$capturedImagePath.left.jpg');
+    final right = File('$capturedImagePath.right.jpg');
+    await source.copy(left.path);
+    await source.copy(right.path);
+    return SpreadCaptureParts(
+      leftImagePath: left.path,
+      rightImagePath: right.path,
+    );
+  }
+}
+
+class _TestSpreadFallbackCropper implements SpreadFallbackCropper {
+  const _TestSpreadFallbackCropper();
+
+  @override
+  Future<void> crop({
+    required String sourceImagePath,
+    required String outputImagePath,
+    required DocumentPageSide pageSide,
+  }) async {
+    await File(outputImagePath).writeAsBytes([9, 8, 7]);
+  }
+}
+
+class _SuccessfulPageCorrector implements PageCorrector {
+  const _SuccessfulPageCorrector();
+
+  @override
+  Future<PageCorrectionResult> correct({
+    required String sourceImagePath,
+    required String outputImagePath,
+    required DocumentCorners corners,
+    required CorrectionType type,
+    required PageBoundaryMode boundaryMode,
+    PageBoundary? pageBoundary,
+  }) async {
+    await File(outputImagePath).writeAsBytes([4, 5, 6]);
+    return const PageCorrectionResult(outputWidth: 900, outputHeight: 1400);
+  }
+}
+
+class _FailingPageCorrector implements PageCorrector {
+  const _FailingPageCorrector();
+
+  @override
+  Future<PageCorrectionResult> correct({
+    required String sourceImagePath,
+    required String outputImagePath,
+    required DocumentCorners corners,
+    required CorrectionType type,
+    required PageBoundaryMode boundaryMode,
+    PageBoundary? pageBoundary,
+  }) {
+    throw StateError('Correction failed.');
+  }
+}
+
+class _CurveStageFailingPageCorrector implements PageCorrector {
+  final List<CorrectionType> calls = [];
+
+  @override
+  Future<PageCorrectionResult> correct({
+    required String sourceImagePath,
+    required String outputImagePath,
+    required DocumentCorners corners,
+    required CorrectionType type,
+    required PageBoundaryMode boundaryMode,
+    PageBoundary? pageBoundary,
+  }) async {
+    calls.add(type);
+    if (type == CorrectionType.curved) {
+      throw StateError('Stable page curvature was not found.');
+    }
+    await File(outputImagePath).writeAsBytes([7, 8, 9]);
+    return const PageCorrectionResult(outputWidth: 900, outputHeight: 1400);
+  }
+}
+
+class _RecordingBoundaryCorrector implements PageCorrector {
+  final List<PageBoundary?> boundaries = [];
+
+  @override
+  Future<PageCorrectionResult> correct({
+    required String sourceImagePath,
+    required String outputImagePath,
+    required DocumentCorners corners,
+    required CorrectionType type,
+    required PageBoundaryMode boundaryMode,
+    PageBoundary? pageBoundary,
+  }) async {
+    boundaries.add(pageBoundary);
+    await File(outputImagePath).writeAsBytes([1, 2, 3]);
+    return const PageCorrectionResult(outputWidth: 900, outputHeight: 1400);
   }
 }

@@ -5,10 +5,40 @@ class CameraSession {
   CameraSession._(this.controller);
 
   final CameraController controller;
+  bool _isDisposed = false;
+
+  bool get isDisposed => _isDisposed;
 
   Future<String> captureRawImage() async {
     final capturedImage = await controller.takePicture();
     return capturedImage.path;
+  }
+
+  bool get isAnalyzingPreview => controller.value.isStreamingImages;
+
+  /// Reuses the app-start controller after returning from result routes.
+  /// No controller is recreated here, and a disposed controller is never read.
+  Future<bool> ensurePreviewReady() async {
+    if (_isDisposed || !controller.value.isInitialized) return false;
+    if (controller.value.isPreviewPaused) {
+      await controller.resumePreview();
+    }
+    return !_isDisposed && controller.value.isInitialized;
+  }
+
+  Future<void> startPreviewAnalysis(
+    void Function(CameraImage image) onFrame,
+  ) async {
+    if (!await ensurePreviewReady() || controller.value.isStreamingImages) {
+      return;
+    }
+    await controller.startImageStream(onFrame);
+  }
+
+  Future<void> stopPreviewAnalysis() async {
+    if (!_isDisposed && controller.value.isStreamingImages) {
+      await controller.stopImageStream();
+    }
   }
 
   /// Initializes the preferred rear camera before the app UI is displayed.
@@ -27,6 +57,7 @@ class CameraSession {
         selectedCamera,
         ResolutionPreset.high,
         enableAudio: false,
+        imageFormatGroup: ImageFormatGroup.yuv420,
       );
       await controller.initialize();
 
@@ -38,7 +69,11 @@ class CameraSession {
     }
   }
 
-  Future<void> dispose() => controller.dispose();
+  Future<void> dispose() async {
+    if (_isDisposed) return;
+    _isDisposed = true;
+    await controller.dispose();
+  }
 
   static String _messageFor(CameraException error) {
     return switch (error.code) {

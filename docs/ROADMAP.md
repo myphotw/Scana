@@ -20,12 +20,16 @@ Android 카메라 프리뷰와 권한 처리를 구현한다.
 
 OpenCV 기반 촬영 이미지 문서 검출, 모서리 Overlay, 수동 Corner 조정과 영속화를 구현한다.
 
+## M6 — Perspective Correction & Page Flattening
+
+OpenCV 원근 변환, 경계/inset 기반의 보수적 곡면 평탄화, Guide Corner 영속화와 연속 촬영·Scan Document List·Viewer 중심 UX를 구현한다.
+
 ### Phase 5 고급 기능 (예정)
 
 - 문서 중심 Auto Capture
 - 자동 연속 스캔
 - Camera Preview 실시간 문서 검출
 
-## Phase 6 — 편집과 내보내기
+## Phase 7 — 화질 보정과 내보내기
 
-원근·곡면·화질 보정, OCR 제목 추천, PDF 생성 및 저장 위치 선택을 구현한다.
+문서 화질 보정, OCR 제목 추천, PDF 생성 및 저장 위치 선택을 구현한다.

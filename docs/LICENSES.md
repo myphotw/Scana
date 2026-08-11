@@ -12,7 +12,7 @@
 | path 1.9.1 | 플랫폼 독립 경로 조합 | BSD 3-Clause |
 | path_provider 2.1.6 | 앱 전용 저장 디렉터리 조회 | BSD 3-Clause |
 | uuid 4.6.0 | ScanSession ID 생성 | MIT |
-| OpenCV Android AAR 4.13.0 (`org.opencv:opencv`) | 오프라인 문서 영역 검출 | Apache License 2.0 |
+| OpenCV Android AAR 4.13.0 (`org.opencv:opencv`) | 오프라인 문서 검출, 원근 변환, 곡면 remap | Apache License 2.0 |
 
 ## 도입 규칙
 
@@ -25,3 +25,5 @@ OpenCV 4.13.0은 OpenCV Team이 Maven Central에 배포하는 공식 Android AAR
 - Maven Central artifact: https://central.sonatype.com/artifact/org.opencv/opencv/4.13.0
 
 OCR 및 PDF 라이브러리는 아직 추가하지 않았다.
+
+M6에서는 새 외부 라이브러리를 추가하지 않고 M5에서 도입한 OpenCV 4.13.0을 재사용한다.

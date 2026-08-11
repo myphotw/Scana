@@ -7,8 +7,21 @@ import 'package:path_provider/path_provider.dart';
 import 'package:scana/models/scan_page.dart';
 import 'package:scana/models/scan_session.dart';
 import 'package:scana/models/document_detection_result.dart';
+import 'package:scana/models/page_correction.dart';
+import 'package:scana/models/page_boundary.dart';
+import 'package:scana/models/scan_capture_mode.dart';
 
 typedef AppPrivateDirectoryProvider = Future<Directory> Function();
+
+class CorrectionOutputTarget {
+  const CorrectionOutputTarget({
+    required this.workingPath,
+    required this.finalPath,
+  });
+
+  final String workingPath;
+  final String finalPath;
+}
 
 /// Storage operations for raw files in an app-private scan session.
 abstract interface class ScanSessionStorage {
@@ -26,7 +39,17 @@ abstract interface class ScanSessionStorage {
 
   Future<void> deleteSession(String sessionId);
 
-  Future<void> deletePageFile(String rawImagePath);
+  Future<CorrectionOutputTarget> prepareCorrectionOutput({
+    required String sessionId,
+    required String rawImagePath,
+    required CorrectionType type,
+  });
+
+  Future<String> commitCorrectionOutput(CorrectionOutputTarget target);
+
+  Future<void> discardCorrectionOutput(CorrectionOutputTarget target);
+
+  Future<void> deletePageFiles(ScanPage page);
 }
 
 /// Stores sessions in the app support directory, outside OS-managed caches.
@@ -55,6 +78,7 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
     final metadata = <String, Object>{
       'id': session.id,
       'createdTime': session.createdTime.toIso8601String(),
+      'captureMode': session.captureMode.name,
       'pages': session.pages
           .map(
             (page) => <String, Object>{
@@ -68,6 +92,19 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
                 'documentSourceHeight': page.documentSourceHeight!,
               if (page.documentCorners != null)
                 'documentCorners': page.documentCorners!.toJson(),
+              if (page.pageBoundary != null)
+                'pageBoundary': page.pageBoundary!.toJson(),
+              if (page.captureGuideCorners != null)
+                'captureGuideCorners': page.captureGuideCorners!.toJson(),
+              if (page.detectionConfidence != null)
+                'detectionConfidence': page.detectionConfidence!,
+              'spreadFallbackUsed': page.spreadFallbackUsed,
+              'hasUserAdjustedCorners': page.hasUserAdjustedCorners,
+              if (page.correctedImagePath != null)
+                'correctedImageFile': path.basename(page.correctedImagePath!),
+              'correctionStatus': page.correctionStatus.name,
+              'correctionType': page.correctionType.name,
+              'correctionOutcome': page.correctionOutcome.name,
             },
           )
           .toList(),
@@ -122,10 +159,15 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
       if (createdTime == null) {
         return null;
       }
+      final captureMode = ScanCaptureMode.values.firstWhere(
+        (mode) => mode.name == metadata['captureMode'],
+        orElse: () => ScanCaptureMode.single,
+      );
 
       final session = ScanSession(
         id: metadata['id'] as String,
         createdTime: createdTime,
+        captureMode: captureMode,
       );
       for (final pageData in metadata['pages'] as List<dynamic>) {
         if (pageData is! Map<String, dynamic>) {
@@ -141,18 +183,66 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
         final sourceHeight = pageData['documentSourceHeight'] as int?;
         final cornersValue = pageData['documentCorners'];
         final documentCorners = DocumentCorners.fromJson(cornersValue);
+        final boundaryValue = pageData['pageBoundary'];
+        final pageBoundary = PageBoundary.fromJson(boundaryValue);
+        final guideCornersValue = pageData['captureGuideCorners'];
+        final captureGuideCorners = DocumentCorners.fromJson(guideCornersValue);
+        final detectionConfidence = (pageData['detectionConfidence'] as num?)
+            ?.toDouble();
+        final spreadFallbackUsed =
+            pageData['spreadFallbackUsed'] as bool? ?? false;
+        final hasUserAdjustedCorners =
+            pageData['hasUserAdjustedCorners'] as bool? ?? false;
+        final correctedImageFile = pageData['correctedImageFile'] as String?;
+        final correctionType = _correctionTypeFromJson(
+          pageData['correctionType'],
+        );
+        var correctionOutcome = _correctionOutcomeFromJson(
+          pageData['correctionOutcome'],
+        );
+        var correctionStatus = _correctionStatusFromJson(
+          pageData['correctionStatus'],
+        );
         if (pageNo == null ||
             rawImageFile == null ||
             !_isRelativeFileName(rawImageFile) ||
             pageCreatedTime == null ||
             !_isValidRotation(rotation) ||
-            (cornersValue != null && documentCorners == null)) {
+            (cornersValue != null && documentCorners == null) ||
+            (boundaryValue != null && pageBoundary == null) ||
+            (guideCornersValue != null && captureGuideCorners == null) ||
+            (correctedImageFile != null &&
+                !_isRelativeFileName(correctedImageFile))) {
           return null;
         }
 
         final rawImagePath = path.join(sessionDirectory.path, rawImageFile);
         if (!await File(rawImagePath).exists()) {
           return null;
+        }
+        String? correctedImagePath;
+        if (correctedImageFile != null &&
+            _isRelativeFileName(correctedImageFile)) {
+          final candidate = path.join(
+            sessionDirectory.path,
+            correctedImageFile,
+          );
+          if (await File(candidate).exists()) {
+            correctedImagePath = candidate;
+          } else if (correctionStatus == CorrectionStatus.completed) {
+            correctionStatus = CorrectionStatus.failed;
+          }
+        }
+        if (correctionStatus == CorrectionStatus.processing) {
+          correctionStatus = CorrectionStatus.failed;
+        }
+        if (correctionStatus == CorrectionStatus.completed &&
+            correctedImagePath == null) {
+          correctionStatus = CorrectionStatus.failed;
+        }
+        if (correctionOutcome == CorrectionOutcome.none &&
+            correctionStatus == CorrectionStatus.completed) {
+          correctionOutcome = CorrectionOutcome.completed;
         }
         session.addPage(
           ScanPage(
@@ -161,8 +251,17 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
             createdTime: pageCreatedTime,
             rotation: rotation!,
             documentCorners: documentCorners,
+            pageBoundary: pageBoundary,
             documentSourceWidth: sourceWidth,
             documentSourceHeight: sourceHeight,
+            captureGuideCorners: captureGuideCorners,
+            detectionConfidence: detectionConfidence,
+            spreadFallbackUsed: spreadFallbackUsed,
+            hasUserAdjustedCorners: hasUserAdjustedCorners,
+            correctedImagePath: correctedImagePath,
+            correctionStatus: correctionStatus,
+            correctionType: correctionType,
+            correctionOutcome: correctionOutcome,
           ),
         );
       }
@@ -255,10 +354,81 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
   }
 
   @override
-  Future<void> deletePageFile(String rawImagePath) async {
-    final file = File(rawImagePath);
-    if (await file.exists()) {
-      await file.delete();
+  Future<CorrectionOutputTarget> prepareCorrectionOutput({
+    required String sessionId,
+    required String rawImagePath,
+    required CorrectionType type,
+  }) async {
+    final directory = await _sessionDirectory(sessionId);
+    await directory.create(recursive: true);
+    final rawStem = path.basenameWithoutExtension(rawImagePath);
+    final suffix = rawStem.startsWith('raw_')
+        ? rawStem.substring('raw_'.length)
+        : rawStem;
+    final baseName = type == CorrectionType.perspective
+        ? 'corrected_$suffix.jpg'
+        : 'corrected_curved_$suffix.jpg';
+    var finalName = baseName;
+    var revision = 2;
+    while (await File(path.join(directory.path, finalName)).exists()) {
+      finalName = '${path.basenameWithoutExtension(baseName)}_$revision.jpg';
+      revision++;
+    }
+    return CorrectionOutputTarget(
+      workingPath: path.join(directory.path, '.$finalName.pending.jpg'),
+      finalPath: path.join(directory.path, finalName),
+    );
+  }
+
+  @override
+  Future<String> commitCorrectionOutput(CorrectionOutputTarget target) async {
+    final workingFile = File(target.workingPath);
+    if (!await workingFile.exists()) {
+      throw const FileSystemException('Correction output was not created.');
+    }
+    await workingFile.copy(target.finalPath);
+    await workingFile.delete();
+    return target.finalPath;
+  }
+
+  @override
+  Future<void> discardCorrectionOutput(CorrectionOutputTarget target) async {
+    final workingFile = File(target.workingPath);
+    if (await workingFile.exists()) {
+      await workingFile.delete();
+    }
+  }
+
+  @override
+  Future<void> deletePageFiles(ScanPage page) async {
+    final rawStem = path.basenameWithoutExtension(page.rawImagePath);
+    final suffix = rawStem.startsWith('raw_')
+        ? rawStem.substring('raw_'.length)
+        : rawStem;
+    final parentDirectory = path.dirname(page.rawImagePath);
+    final filePaths = <String>{
+      page.rawImagePath,
+      if (page.correctedImagePath != null) page.correctedImagePath!,
+    };
+    final correctionFilePattern = RegExp(
+      r'^\.?corrected(?:_curved)?_' +
+          RegExp.escape(suffix) +
+          r'(?:_\d+)?\.jpg(?:\.pending\.jpg)?$',
+    );
+    final directory = Directory(parentDirectory);
+    if (await directory.exists()) {
+      await for (final entity in directory.list(followLinks: false)) {
+        if (entity is File &&
+            correctionFilePattern.hasMatch(path.basename(entity.path))) {
+          filePaths.add(entity.path);
+        }
+      }
+    }
+    for (final filePath in filePaths) {
+      final file = File(filePath);
+      if (await file.exists()) {
+        await file.delete();
+      }
     }
   }
 
@@ -277,5 +447,26 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
 
   static bool _isValidRotation(int? value) {
     return value == 0 || value == 90 || value == 180 || value == 270;
+  }
+
+  static CorrectionStatus _correctionStatusFromJson(Object? value) {
+    return CorrectionStatus.values.firstWhere(
+      (status) => status.name == value,
+      orElse: () => CorrectionStatus.none,
+    );
+  }
+
+  static CorrectionType _correctionTypeFromJson(Object? value) {
+    return CorrectionType.values.firstWhere(
+      (type) => type.name == value,
+      orElse: () => CorrectionType.perspective,
+    );
+  }
+
+  static CorrectionOutcome _correctionOutcomeFromJson(Object? value) {
+    return CorrectionOutcome.values.firstWhere(
+      (outcome) => outcome.name == value,
+      orElse: () => CorrectionOutcome.none,
+    );
   }
 }

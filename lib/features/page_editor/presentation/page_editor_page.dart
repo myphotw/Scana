@@ -5,13 +5,21 @@ import 'package:flutter/material.dart';
 
 import 'package:scana/features/scan_session/application/scan_session_manager.dart';
 import 'package:scana/models/document_detection_result.dart';
+import 'package:scana/models/page_correction.dart';
 import 'package:scana/models/scan_page.dart';
 
 /// Lets a user arrange and annotate raw scan pages before later processing.
 class PageEditorPage extends StatefulWidget {
-  const PageEditorPage({super.key, required this.sessionManager});
+  const PageEditorPage({
+    super.key,
+    required this.sessionManager,
+    this.initialPageIndex,
+    this.showPageList = true,
+  });
 
   final ScanSessionManager sessionManager;
+  final int? initialPageIndex;
+  final bool showPageList;
 
   @override
   State<PageEditorPage> createState() => _PageEditorPageState();
@@ -19,6 +27,12 @@ class PageEditorPage extends StatefulWidget {
 
 class _PageEditorPageState extends State<PageEditorPage> {
   int? _selectedPageIndex;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedPageIndex = widget.initialPageIndex;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -37,16 +51,27 @@ class _PageEditorPageState extends State<PageEditorPage> {
               selectedIndex != null && selectedIndex < pages.length
               ? pages[selectedIndex]
               : null;
+          if (!widget.showPageList && selectedPage != null) {
+            return _SelectedPageWorkbench(
+              key: ValueKey(selectedPage.rawImagePath),
+              page: selectedPage,
+              pageIndex: selectedIndex!,
+              sessionManager: widget.sessionManager,
+            );
+          }
           return Column(
             children: [
               if (selectedPage != null)
                 SizedBox(
-                  height: MediaQuery.sizeOf(context).height * 0.42,
-                  child: _DocumentCornerEditor(
+                  height: (MediaQuery.sizeOf(context).height * 0.55).clamp(
+                    390.0,
+                    560.0,
+                  ),
+                  child: _SelectedPageWorkbench(
                     key: ValueKey(selectedPage.rawImagePath),
                     page: selectedPage,
-                    onSave: (corners) => widget.sessionManager
-                        .updateDocumentCornersAt(selectedIndex!, corners),
+                    pageIndex: selectedIndex!,
+                    sessionManager: widget.sessionManager,
                   ),
                 ),
               Expanded(
@@ -90,15 +115,234 @@ class _PageEditorPageState extends State<PageEditorPage> {
   }
 }
 
-class _DocumentCornerEditor extends StatefulWidget {
-  const _DocumentCornerEditor({
+class _SelectedPageWorkbench extends StatefulWidget {
+  const _SelectedPageWorkbench({
     super.key,
     required this.page,
-    required this.onSave,
+    required this.pageIndex,
+    required this.sessionManager,
   });
 
   final ScanPage page;
-  final Future<void> Function(DocumentCorners corners) onSave;
+  final int pageIndex;
+  final ScanSessionManager sessionManager;
+
+  @override
+  State<_SelectedPageWorkbench> createState() => _SelectedPageWorkbenchState();
+}
+
+class _SelectedPageWorkbenchState extends State<_SelectedPageWorkbench> {
+  late CorrectionType _correctionType;
+  DocumentCorners? _editedCorners;
+  bool _showCorrected = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _correctionType = widget.page.correctionType;
+    _editedCorners = _DocumentCornerEditorState.initialCorners(widget.page);
+    _showCorrected = widget.page.correctedImagePath != null;
+  }
+
+  @override
+  void didUpdateWidget(covariant _SelectedPageWorkbench oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.page.rawImagePath != widget.page.rawImagePath) {
+      _correctionType = widget.page.correctionType;
+      _editedCorners = _DocumentCornerEditorState.initialCorners(widget.page);
+      _showCorrected = false;
+    }
+    if (widget.page.correctedImagePath == null) {
+      _showCorrected = false;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final page = widget.page;
+    final isProcessing = page.correctionStatus == CorrectionStatus.processing;
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+          child: Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              onPressed: () => setState(() => _showCorrected = !_showCorrected),
+              icon: Icon(
+                _showCorrected ? Icons.crop_free_outlined : Icons.auto_fix_high,
+              ),
+              label: Text(_showCorrected ? '모서리 수정' : '스캔본으로 돌아가기'),
+            ),
+          ),
+        ),
+        Expanded(
+          child: _showCorrected && page.correctedImagePath != null
+              ? _CorrectedPagePreview(
+                  imagePath: page.correctedImagePath!,
+                  rotation: page.rotation,
+                )
+              : _DocumentCornerEditor(
+                  page: page,
+                  onChanged: (corners) => _editedCorners = corners,
+                ),
+        ),
+        SafeArea(
+          key: const ValueKey('page-editor-action-toolbar'),
+          top: false,
+          minimum: const EdgeInsets.fromLTRB(12, 6, 12, 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: SegmentedButton<CorrectionType>(
+                      segments: const [
+                        ButtonSegment(
+                          value: CorrectionType.perspective,
+                          label: Text('원근 보정'),
+                        ),
+                        ButtonSegment(
+                          value: CorrectionType.curved,
+                          label: Text('책/곡면 문서 보정'),
+                        ),
+                      ],
+                      selected: {_correctionType},
+                      onSelectionChanged: isProcessing
+                          ? null
+                          : (selection) {
+                              setState(
+                                () => _correctionType = selection.single,
+                              );
+                            },
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  IconButton(
+                    tooltip: '회전',
+                    onPressed: isProcessing
+                        ? null
+                        : () => widget.sessionManager.rotatePageAt(
+                            widget.pageIndex,
+                          ),
+                    icon: const Icon(Icons.rotate_right),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: isProcessing || _editedCorners == null
+                          ? null
+                          : _saveCorners,
+                      icon: const Icon(Icons.save_outlined),
+                      label: const Text('모서리 저장'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed: isProcessing ? null : _correctPage,
+                      icon: isProcessing
+                          ? const SizedBox.square(
+                              dimension: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.auto_fix_high),
+                      label: Text(
+                        page.correctedImagePath == null ? '보정 실행' : '다시 보정',
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                _correctionStatusLabel(
+                  page.correctionStatus,
+                  type: page.correctionType,
+                  outcome: page.correctionOutcome,
+                ),
+                style: Theme.of(context).textTheme.bodySmall,
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _correctPage() async {
+    final succeeded = await widget.sessionManager.correctPageAt(
+      widget.pageIndex,
+      _correctionType,
+    );
+    if (mounted && succeeded) {
+      setState(() => _showCorrected = true);
+    }
+  }
+
+  Future<void> _saveCorners() async {
+    final corners = _editedCorners;
+    if (corners == null) {
+      return;
+    }
+    await widget.sessionManager.updateDocumentCornersAt(
+      widget.pageIndex,
+      corners,
+    );
+  }
+}
+
+class _CorrectedPagePreview extends StatelessWidget {
+  const _CorrectedPagePreview({
+    required this.imagePath,
+    required this.rotation,
+  });
+
+  final String imagePath;
+  final int rotation;
+
+  @override
+  Widget build(BuildContext context) {
+    return ColoredBox(
+      color: Colors.black,
+      child: Center(
+        child: Transform.rotate(
+          key: const ValueKey('editor-corrected-rotation'),
+          angle: rotation * math.pi / 180,
+          child: Image.file(
+            File(imagePath),
+            fit: BoxFit.contain,
+            errorBuilder: (context, error, stackTrace) {
+              return const Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.broken_image_outlined, color: Colors.white),
+                  SizedBox(height: 8),
+                  Text(
+                    '보정 이미지를 불러올 수 없습니다.',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                ],
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DocumentCornerEditor extends StatefulWidget {
+  const _DocumentCornerEditor({required this.page, required this.onChanged});
+
+  final ScanPage page;
+  final ValueChanged<DocumentCorners> onChanged;
 
   @override
   State<_DocumentCornerEditor> createState() => _DocumentCornerEditorState();
@@ -110,14 +354,14 @@ class _DocumentCornerEditorState extends State<_DocumentCornerEditor> {
   @override
   void initState() {
     super.initState();
-    _corners = _initialCorners(widget.page);
+    _corners = initialCorners(widget.page);
   }
 
   @override
   void didUpdateWidget(covariant _DocumentCornerEditor oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.page != widget.page) {
-      _corners = _initialCorners(widget.page);
+      _corners = initialCorners(widget.page);
     }
   }
 
@@ -135,91 +379,78 @@ class _DocumentCornerEditorState extends State<_DocumentCornerEditor> {
     }
 
     return ColoredBox(
+      key: const ValueKey('page-editor-image-preview'),
       color: Colors.black,
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final layout = _ContainedImageLayout.calculate(
-            constraints.biggest,
-            Size(sourceWidth.toDouble(), sourceHeight.toDouble()),
-          );
-          final displayPoints = corners.ordered
-              .map(layout.toDisplayPoint)
-              .toList();
-          return Stack(
-            fit: StackFit.expand,
-            children: [
-              Image.file(
-                File(widget.page.rawImagePath),
-                fit: BoxFit.contain,
-                errorBuilder: (context, error, stackTrace) {
-                  return const Icon(Icons.image_not_supported_outlined);
-                },
-              ),
-              CustomPaint(painter: _DocumentCornersPainter(displayPoints)),
-              for (var index = 0; index < displayPoints.length; index++)
-                Positioned(
-                  left: displayPoints[index].dx - 18,
-                  top: displayPoints[index].dy - 18,
-                  child: GestureDetector(
-                    onPanUpdate: (details) {
-                      final current = _corners!.ordered[index];
-                      final moved = DocumentPoint(
-                        (current.x + details.delta.dx / layout.scale)
-                            .clamp(0.0, sourceWidth.toDouble())
-                            .toDouble(),
-                        (current.y + details.delta.dy / layout.scale)
-                            .clamp(0.0, sourceHeight.toDouble())
-                            .toDouble(),
-                      );
-                      setState(() {
-                        _corners = _corners!.replaceAt(index, moved);
-                      });
-                    },
-                    child: const SizedBox.square(
-                      dimension: 36,
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          shape: BoxShape.circle,
-                          border: Border.fromBorderSide(
-                            BorderSide(color: Colors.indigo, width: 3),
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final layout = _ContainedImageLayout.calculate(
+              constraints.biggest,
+              Size(sourceWidth.toDouble(), sourceHeight.toDouble()),
+            );
+            final displayPoints = corners.ordered
+                .map(layout.toDisplayPoint)
+                .toList();
+            return Stack(
+              fit: StackFit.expand,
+              children: [
+                Image.file(
+                  File(widget.page.rawImagePath),
+                  fit: BoxFit.contain,
+                  errorBuilder: (context, error, stackTrace) {
+                    return const Icon(Icons.image_not_supported_outlined);
+                  },
+                ),
+                CustomPaint(painter: _DocumentCornersPainter(displayPoints)),
+                for (var index = 0; index < displayPoints.length; index++)
+                  Positioned(
+                    left: displayPoints[index].dx - 18,
+                    top: displayPoints[index].dy - 18,
+                    child: GestureDetector(
+                      onPanUpdate: (details) {
+                        final current = _corners!.ordered[index];
+                        final moved = DocumentPoint(
+                          (current.x + details.delta.dx / layout.scale)
+                              .clamp(0.0, sourceWidth.toDouble())
+                              .toDouble(),
+                          (current.y + details.delta.dy / layout.scale)
+                              .clamp(0.0, sourceHeight.toDouble())
+                              .toDouble(),
+                        );
+                        setState(() {
+                          _corners = _corners!.replaceAt(index, moved);
+                        });
+                        widget.onChanged(_corners!);
+                      },
+                      child: SizedBox.square(
+                        key: ValueKey('document-corner-$index'),
+                        dimension: 36,
+                        child: const DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            shape: BoxShape.circle,
+                            border: Border.fromBorderSide(
+                              BorderSide(color: Colors.indigo, width: 3),
+                            ),
                           ),
                         ),
                       ),
                     ),
                   ),
-                ),
-              Positioned(
-                right: 12,
-                bottom: 12,
-                child: FilledButton.icon(
-                  onPressed: () => widget.onSave(_corners!),
-                  icon: const Icon(Icons.save_outlined),
-                  label: const Text('모서리 저장'),
-                ),
-              ),
-            ],
-          );
-        },
+              ],
+            );
+          },
+        ),
       ),
     );
   }
 
-  static DocumentCorners? _initialCorners(ScanPage page) {
-    if (page.documentCorners != null) {
+  static DocumentCorners? initialCorners(ScanPage page) {
+    if (page.hasUserAdjustedCorners && page.documentCorners != null) {
       return page.documentCorners;
     }
-    final width = page.documentSourceWidth;
-    final height = page.documentSourceHeight;
-    if (width == null || height == null || width <= 0 || height <= 0) {
-      return null;
-    }
-    return DocumentCorners(
-      topLeft: DocumentPoint(width * 0.08, height * 0.08),
-      topRight: DocumentPoint(width * 0.92, height * 0.08),
-      bottomRight: DocumentPoint(width * 0.92, height * 0.92),
-      bottomLeft: DocumentPoint(width * 0.08, height * 0.92),
-    );
+    return page.documentCorners ?? page.captureGuideCorners;
   }
 }
 
@@ -303,7 +534,11 @@ class _PageEditorTile extends StatelessWidget {
       onTap: onSelect,
       leading: _PageThumbnail(page: page, size: 64),
       title: Text('페이지 ${page.pageNo}'),
-      subtitle: Text('회전 ${page.rotation}°'),
+      subtitle: Text(
+        '회전 ${page.rotation}° · '
+        '${_correctionTypeLabel(page.correctionType)} · '
+        '${_correctionStatusLabel(page.correctionStatus, outcome: page.correctionOutcome)}',
+      ),
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -321,6 +556,37 @@ class _PageEditorTile extends StatelessWidget {
       ),
     );
   }
+}
+
+String _correctionTypeLabel(CorrectionType type) {
+  return switch (type) {
+    CorrectionType.perspective => '원근',
+    CorrectionType.curved => '곡면',
+  };
+}
+
+String _correctionStatusLabel(
+  CorrectionStatus status, {
+  CorrectionType? type,
+  CorrectionOutcome outcome = CorrectionOutcome.none,
+}) {
+  return switch (status) {
+    CorrectionStatus.none => '보정 전',
+    CorrectionStatus.processing => '보정 중',
+    CorrectionStatus.completed => '보정 완료',
+    CorrectionStatus.failed when outcome == CorrectionOutcome.nearlyFlat =>
+      '곡면이 거의 없어 Perspective 결과를 유지합니다.',
+    CorrectionStatus.failed
+        when outcome == CorrectionOutcome.unsafeDeformation =>
+      '안전하지 않은 변형이라 Perspective 결과를 유지합니다.',
+    CorrectionStatus.failed when outcome == CorrectionOutcome.notImproved =>
+      '곡면 결과가 개선되지 않아 Perspective 결과를 유지합니다.',
+    CorrectionStatus.failed when outcome == CorrectionOutcome.lowConfidence =>
+      '곡률 검출 신뢰도가 부족해 Perspective 결과를 유지합니다.',
+    CorrectionStatus.failed when type == CorrectionType.curved =>
+      '곡률 검출 신뢰도가 부족해 Perspective 결과를 유지합니다.',
+    CorrectionStatus.failed => '보정 실패 · 다시 시도할 수 있습니다',
+  };
 }
 
 class _PageThumbnail extends StatelessWidget {
