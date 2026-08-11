@@ -9,6 +9,7 @@ import 'package:scana/features/scan_result/presentation/page_management_page.dar
 import 'package:scana/features/scan_session/application/scan_session_manager.dart';
 import 'package:scana/models/scan_page.dart';
 import 'package:scana/services/camera/camera_session.dart';
+import 'package:scana/services/diagnostics/debug_diagnostics.dart';
 
 /// Default scan-result experience. Raw images are only shown in the editor.
 class ScanResultViewerPage extends StatefulWidget {
@@ -38,10 +39,18 @@ class _ScanResultViewerPageState extends State<ScanResultViewerPage> {
     final count = widget.sessionManager.pageCount;
     _pageIndex = count == 0 ? 0 : widget.initialPageIndex.clamp(0, count - 1);
     _pageController = PageController(initialPage: _pageIndex);
+    DebugDiagnostics.instance.logState(
+      'ScanResultViewerPage.initState PageController.created',
+      mounted: mounted,
+    );
   }
 
   @override
   void dispose() {
+    DebugDiagnostics.instance.logState(
+      'ScanResultViewerPage.dispose PageController.dispose',
+      mounted: mounted,
+    );
     _pageController.dispose();
     super.dispose();
   }
@@ -54,7 +63,9 @@ class _ScanResultViewerPageState extends State<ScanResultViewerPage> {
         final pages = widget.sessionManager.currentSession?.pages ?? const [];
         if (pages.isEmpty) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted && !_isExitingEmptySession) {
+            if (mounted &&
+                !_isExitingEmptySession &&
+                ModalRoute.of(context)?.isCurrent == true) {
               _isExitingEmptySession = true;
               Navigator.of(context).pop(true);
             }
@@ -75,14 +86,7 @@ class _ScanResultViewerPageState extends State<ScanResultViewerPage> {
               ),
               IconButton(
                 tooltip: '페이지 관리',
-                onPressed: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (context) => PageManagementPage(
-                      sessionManager: widget.sessionManager,
-                      cameraStartup: widget.cameraStartup,
-                    ),
-                  ),
-                ),
+                onPressed: _openPageManagement,
                 icon: const Icon(Icons.view_list_outlined),
               ),
             ],
@@ -131,6 +135,24 @@ class _ScanResultViewerPageState extends State<ScanResultViewerPage> {
         );
       },
     );
+  }
+
+  Future<void> _openPageManagement() async {
+    await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(
+        builder: (context) => PageManagementPage(
+          sessionManager: widget.sessionManager,
+          cameraStartup: widget.cameraStartup,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    if (widget.sessionManager.pageCount == 0 &&
+        !_isExitingEmptySession &&
+        ModalRoute.of(context)?.isCurrent == true) {
+      _isExitingEmptySession = true;
+      Navigator.of(context).pop(true);
+    }
   }
 
   Future<void> _retake(int index) async {

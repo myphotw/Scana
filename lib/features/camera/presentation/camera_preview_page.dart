@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -16,6 +17,7 @@ import 'package:scana/models/page_boundary.dart';
 import 'package:scana/models/scan_capture_mode.dart';
 import 'package:scana/services/camera/camera_session.dart';
 import 'package:scana/services/image_processing/live_document_detection.dart';
+import 'package:scana/services/diagnostics/debug_diagnostics.dart';
 
 /// Full-screen camera entry point for the document scanning flow.
 class CameraPreviewPage extends StatefulWidget {
@@ -46,6 +48,10 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
   @override
   void initState() {
     super.initState();
+    DebugDiagnostics.instance.logState(
+      'CameraPreviewPage.initState',
+      mounted: mounted,
+    );
     _liveDetection = LiveDocumentDetectionController(
       detector:
           widget.previewDocumentDetector ??
@@ -316,6 +322,21 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
               },
             ),
           ),
+          if (kDebugMode)
+            SafeArea(
+              child: Align(
+                alignment: Alignment.topRight,
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 56, right: 16),
+                  child: IconButton.filledTonal(
+                    key: const Key('exportDebugLogButton'),
+                    tooltip: '진단 로그 내보내기',
+                    onPressed: _exportDebugLog,
+                    icon: const Icon(Icons.bug_report_outlined),
+                  ),
+                ),
+              ),
+            ),
           SafeArea(
             child: Align(
               alignment: Alignment.topCenter,
@@ -345,9 +366,10 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
                   }
                   return Padding(
                     padding: const EdgeInsets.fromLTRB(20, 0, 0, 24),
-                    child: _LatestPageThumbnail(
+                    child: RecentScanGalleryButton(
                       page: pages.last,
-                      onTap: () => _openViewer(pages.length - 1),
+                      pageCount: pages.length,
+                      onTap: _openGallery,
                     ),
                   );
                 },
@@ -381,33 +403,33 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
               ),
             ),
           ),
-          SafeArea(
-            child: Align(
-              alignment: Alignment.bottomRight,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(0, 0, 20, 30),
-                child: FilledButton.tonalIcon(
-                  onPressed: _finishCapture,
-                  icon: const Icon(Icons.check),
-                  label: const Text('촬영 완료'),
-                ),
-              ),
-            ),
-          ),
         ],
       ),
     );
   }
 
-  Future<void> _finishCapture() async {
-    final processing = widget.sessionManager.processingPageCount;
-    if (processing > 0) {
+  Future<void> _exportDebugLog() async {
+    try {
+      final exported = await DebugDiagnostics.instance.exportLog();
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('$processing장 처리 중입니다. 완료 후 이동할 수 있습니다.')),
+        SnackBar(
+          content: Text(exported ? '진단 로그를 내보냈습니다.' : '진단 로그 내보내기를 취소했습니다.'),
+        ),
       );
-      return;
+    } on PlatformException catch (error) {
+      DebugDiagnostics.instance.log(
+        'DIAGNOSTICS',
+        'export_failed code=${error.code} message=${error.message}',
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('진단 로그를 내보낼 수 없습니다.')));
     }
-    if (widget.sessionManager.pageCount == 0) return;
+  }
+
+  Future<void> _openGallery() async {
     await _stopPreviewAnalysis();
     if (!mounted) return;
     await Navigator.of(context).push(
@@ -421,23 +443,12 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
     if (mounted) unawaited(_startPreviewAnalysis());
   }
 
-  Future<void> _openViewer(int initialPageIndex) async {
-    await _stopPreviewAnalysis();
-    if (!mounted) return;
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (context) => ScanResultViewerPage(
-          sessionManager: widget.sessionManager,
-          cameraStartup: widget.cameraStartup,
-          initialPageIndex: initialPageIndex,
-        ),
-      ),
-    );
-    if (mounted) unawaited(_startPreviewAnalysis());
-  }
-
   @override
   void dispose() {
+    DebugDiagnostics.instance.logState(
+      'CameraPreviewPage.dispose',
+      mounted: mounted,
+    );
     unawaited(_stopPreviewAnalysis());
     unawaited(SystemChrome.setPreferredOrientations(DeviceOrientation.values));
     _liveDetection.dispose();
@@ -672,10 +683,16 @@ class _ScanGuideGeometry {
   }
 }
 
-class _LatestPageThumbnail extends StatelessWidget {
-  const _LatestPageThumbnail({required this.page, required this.onTap});
+class RecentScanGalleryButton extends StatelessWidget {
+  const RecentScanGalleryButton({
+    super.key,
+    required this.page,
+    required this.pageCount,
+    required this.onTap,
+  });
 
   final ScanPage page;
+  final int pageCount;
   final VoidCallback onTap;
 
   @override
@@ -683,31 +700,45 @@ class _LatestPageThumbnail extends StatelessWidget {
     return Material(
       color: Colors.transparent,
       child: InkWell(
+        key: const Key('recentScanGalleryButton'),
         onTap: onTap,
         borderRadius: BorderRadius.circular(10),
-        child: Ink(
-          width: 64,
-          height: 88,
-          decoration: BoxDecoration(
-            border: Border.all(color: Colors.white, width: 2),
-            borderRadius: BorderRadius.circular(10),
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: Transform.rotate(
-              angle: page.rotation * math.pi / 180,
-              child: Image.file(
-                File(page.correctedImagePath ?? page.rawImagePath),
-                fit: BoxFit.cover,
-                errorBuilder: (context, error, stackTrace) {
-                  return const ColoredBox(
-                    color: Colors.black54,
-                    child: Icon(Icons.image_not_supported_outlined),
-                  );
-                },
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Ink(
+              width: 64,
+              height: 88,
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.white, width: 2),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Transform.rotate(
+                  angle: page.rotation * math.pi / 180,
+                  child: Image.file(
+                    File(page.correctedImagePath ?? page.rawImagePath),
+                    fit: BoxFit.cover,
+                    errorBuilder: (context, error, stackTrace) {
+                      return const ColoredBox(
+                        color: Colors.black54,
+                        child: Icon(Icons.image_not_supported_outlined),
+                      );
+                    },
+                  ),
+                ),
               ),
             ),
-          ),
+            Positioned(
+              top: -9,
+              right: -9,
+              child: Badge(
+                key: const Key('recentScanPageCount'),
+                label: Text('$pageCount'),
+              ),
+            ),
+          ],
         ),
       ),
     );

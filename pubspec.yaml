@@ -33,6 +33,7 @@ dependencies:
     sdk: flutter
   path: ^1.9.1
   path_provider: ^2.1.6
+  pdf: ^3.13.0
   uuid: ^4.6.0
 
 

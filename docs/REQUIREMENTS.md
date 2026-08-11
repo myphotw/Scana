@@ -29,8 +29,16 @@ Scana는 스마트폰으로 일반 문서와 책을 촬영하고, 데이터 전�
 - 사용자는 원본 사진이 아니라 촬영 직후 자동 생성된 스캔본을 기본 결과로 본다. corrected 이미지가 없을 때만 raw를 fallback으로 표시한다.
 - 여러 스캔본은 Swipe로 탐색하며, 기본 액션은 재촬영·편집·삭제로 제한한다.
 - 원본·Corner 조작은 상세 편집 화면에만 표시하고, 순서 변경은 별도 페이지 관리 화면에서 수행한다.
-- 촬영은 결과 화면 이동 없이 Camera Preview에서 연속 수행한다. 화면에는 촬영 버튼, 장수, 최근 스캔본, 처리 중 수, 촬영 완료만 표시한다.
+- 촬영은 결과 화면 이동 없이 Camera Preview에서 연속 수행한다. 화면은 촬영 모드, 촬영 버튼, 장수, 최근 스캔본과 처리 중 수만 표시하며 별도 촬영 완료 버튼은 두지 않는다.
 - 촬영 시 사용한 반응형 가이드 영역을 페이지 메타데이터에 저장한다. 편집 Corner 초기값은 사용자 수정 → 자동 검출 → 촬영 가이드 순서로 선택한다.
+- 최근 스캔본을 누르면 corrected 우선 대형 반응형 Grid인 PDF Selection Gallery를 연다. Gallery는 전체/개별 선택, 삭제와 상세 보기만 담당한다.
+- Gallery 완료는 선택 페이지만 담은 PDF Page Review를 연다. Review의 대형 반응형 Grid에서 Long Press Drag로 최종 출력 순서를 정하고, 짧은 Tap은 선택 페이지만 탐색하는 Viewer를 연다.
+- Review에서 확정한 순서 그대로 PDF에 포함한다. corrected 이미지를 우선하고 없으면 raw를 사용하며 rotation 메타데이터를 내보내기 과정에서 적용한다.
+- PDF 파일명은 사용자가 확인하며 `.pdf` 확장자를 자동 처리한다. Android SAF 폴더 선택기로 저장 위치를 지정하고 최근 위치의 persistable URI 권한을 재사용할 수 있다.
+- PDF 생성은 background isolate에서 페이지를 순차 처리하고 진행 장수를 표시한다. SAF 저장이 완전히 검증된 뒤에만 ScanSession을 삭제하고 Camera의 새 스캔 상태로 돌아간다.
+- 파일명 Dialog 종료와 SAF 실행, SAF 복귀와 PDF 진행 표시 사이에는 Flutter 안정 frame을 보장한다. PDF 진행 상태는 별도 Dialog route가 아닌 Review 내부 overlay로 표시한다.
+- DEBUG 빌드는 치명적 Flutter/async 오류의 전체 stack, route, lifecycle과 PDF/SAF 흐름을 앱 전용 영속 로그에 남기고 앱 재시작 후 TXT로 내보낼 수 있어야 한다. Release에서는 이 진단 기능을 비활성화한다.
+- Dialog 입력 controller와 focus/controller 계열 객체는 이를 사용하는 Widget State가 생성하고 실제 `dispose()`에서 해제한다. `showDialog` caller는 pop 결과 직후 해당 객체를 해제하지 않는다.
 
 ## 제약 조건
 
@@ -43,4 +51,6 @@ Scana는 스마트폰으로 일반 문서와 책을 촬영하고, 데이터 전�
 - 보정 실패 시 원본, ScanSession, 이전 보정본을 유지하고 사용자가 다시 시도할 수 있어야 한다.
 - 곡률의 신뢰도가 낮거나 변형량·remap 좌표가 안전 기준을 벗어나면 곡면 변형을 적용하지 않고 Perspective 결과를 유지한다.
 - 재촬영은 새 raw와 Perspective 결과가 모두 확정된 경우에만 기존 페이지를 같은 순서로 교체한다.
-- 촬영 완료는 처리 대기열이 비어 있을 때 Scan Document List로 이동하며, 목록은 전체/개별 선택, 순서 변경과 상세 보기를 제공한다.
+- Gallery 완료는 Review로, Review의 PDF 만들기는 파일명·저장 위치·생성 단계로 이동한다. 각 Back은 이전 상태를 보존하며, 처리 대기열이 남아 있으면 Gallery 완료를 비활성화한다.
+- PDF 저장 취소, 입력 이미지 누락, 생성 또는 SAF 기록 실패 시에는 ScanSession과 모든 raw/corrected 파일 및 선택 상태를 유지한다.
+- 외부 저장소 전체 권한이나 `MANAGE_EXTERNAL_STORAGE`를 요구하지 않고, 사용자가 선택한 SAF URI에만 PDF를 기록한다.

@@ -14,6 +14,7 @@ import 'package:scana/services/image_processing/document_detector.dart';
 import 'package:scana/services/image_processing/page_corrector.dart';
 import 'package:scana/services/image_processing/spread_capture_splitter.dart';
 import 'package:scana/services/storage/scan_session_storage.dart';
+import 'package:scana/services/diagnostics/debug_diagnostics.dart';
 
 typedef SessionIdGenerator = String Function();
 typedef Clock = DateTime Function();
@@ -57,7 +58,9 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
     required this._spreadFallbackCropper,
     required this._sessionIdGenerator,
     required this._clock,
-  });
+  }) {
+    DebugDiagnostics.instance.log('STATE', 'ScanSessionManager.created');
+  }
 
   final ScanSessionStorage _storage;
   final DocumentDetector _documentDetector;
@@ -587,6 +590,7 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
       return;
     }
     _isClosed = true;
+    DebugDiagnostics.instance.log('STATE', 'ScanSessionManager.close');
     dispose();
   }
 

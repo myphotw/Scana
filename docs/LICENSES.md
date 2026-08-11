@@ -11,6 +11,7 @@
 | camera 0.11.3+1 | Android 카메라 프리뷰·촬영 | BSD 3-Clause |
 | path 1.9.1 | 플랫폼 독립 경로 조합 | BSD 3-Clause |
 | path_provider 2.1.6 | 앱 전용 저장 디렉터리 조회 | BSD 3-Clause |
+| pdf 3.13.0 | 기기 내부 PDF 문서·이미지 페이지 생성 | Apache License 2.0 |
 | uuid 4.6.0 | ScanSession ID 생성 | MIT |
 | OpenCV Android AAR 4.13.0 (`org.opencv:opencv`) | 오프라인 문서 검출, 원근 변환, 곡면 remap | Apache License 2.0 |
 
@@ -24,6 +25,12 @@ OpenCV 4.13.0은 OpenCV Team이 Maven Central에 배포하는 공식 Android AAR
 - 공식 Android Maven 사용 안내: https://docs.opencv.org/4.13.0/d5/df8/tutorial_dev_with_OCV_on_Android.html
 - Maven Central artifact: https://central.sonatype.com/artifact/org.opencv/opencv/4.13.0
 
-OCR 및 PDF 라이브러리는 아직 추가하지 않았다.
+`pdf` 3.13.0은 순수 Dart 기반 PDF 생성 라이브러리로 Android에서 네트워크 없이 동작한다. Apache License 2.0에 따라 라이선스와 저작권·NOTICE 고지 의무를 보존한다. 인쇄·공유용 `printing` 패키지는 추가하지 않았다.
+
+- 공식 패키지: https://pub.dev/packages/pdf
+- 공식 라이선스: https://pub.dev/packages/pdf/license
+- 공식 저장소: https://github.com/DavBfr/dart_pdf
+
+OCR 라이브러리는 아직 추가하지 않았다.
 
 M6에서는 새 외부 라이브러리를 추가하지 않고 M5에서 도입한 OpenCV 4.13.0을 재사용한다.

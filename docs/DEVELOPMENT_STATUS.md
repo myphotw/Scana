@@ -14,15 +14,20 @@
 | OpenCV | 사용 중 | 공식 Android AAR 4.13.0, 오프라인 처리 |
 | 원근 보정 | 완료 | 원본 모서리 기반 출력 크기 계산, warpPerspective, corrected 파일 저장 |
 | 곡면 평탄화 | 완료 | 경계 우선/inset fallback, robust 다중 곡률, 안전 검증, strip remap |
-| Continuous Scan UX | 완료 | Camera 유지 연속 촬영, 처리 대기열 표시, 촬영 완료 후 문서 목록 |
-| Scan Result UX | 완료 | corrected 우선 Viewer, Swipe, 재촬영·편집·삭제, 선택 가능한 페이지 관리 |
+| Continuous Scan UX | 완료 | Camera 유지 수동 연속 촬영, 처리 대기열 표시, 최근 썸네일 Gallery 진입 |
+| Scan Result UX | 완료 | Gallery 선택 → Review 확인·Long Press 정렬 → PDF 단방향 흐름 |
 | 보정 UI·영속화 | 완료 | 상세 편집의 Corner SafeArea 툴바, 원본/보정본 비교, 실패 시 Perspective 보호 |
+| PDF Export | 완료 | Review 최종 순서, rotation, fitImage 페이지, 파일명 확인, SAF 저장·최근 위치, 성공 후 Session 정리 |
+| Navigation lifecycle | 수정 완료 | 파일명 Dialog State가 TextEditingController lifecycle을 직접 소유하도록 변경 |
+| M7.2.2 DEBUG 진단 | 구현 완료 | 영속 오류/stack·lifecycle·Navigator·SAF request/result 로그와 재시작 후 TXT 내보내기 |
+| M7.2.3 filename Dialog | 구현 완료 | premature controller dispose 제거, SAF 구조 유지, 반복 Dialog 회귀 테스트 추가 |
 | 화질 보정 | 미착수 | 향후 단계 |
-| OCR·PDF | 미착수 | 향후 단계 |
-| 외부 라이브러리 | 사용 중 | camera, path, path_provider, uuid, OpenCV |
+| OCR | 미착수 | 향후 단계 |
+| 외부 라이브러리 | 사용 중 | camera, path, path_provider, pdf, uuid, OpenCV |
 
 ## Known Issues
 
+- 파일명 Dialog controller premature dispose가 `_dependents.isEmpty`와 Duplicate GlobalKeys의 최초 원인으로 확인되어 M7.2.3에서 수정함. 실기기 재검증 필요
 - 1페이지 문서 검출이 실기기 조건에 따라 일부 영역을 잘못 crop하는 경우가 있음
 - 2페이지 모드는 좌/우 ROI 분리는 동작하지만 각 페이지 자동 영역 검출 정확도가 부족함
 - 곡면 문서 보정은 아직 품질이 충분하지 않아 추후 개선 예정

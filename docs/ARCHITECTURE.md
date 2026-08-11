@@ -44,11 +44,41 @@
 
 - Camera의 기본 촬영 흐름은 raw 저장·문서 검출 후 자동 Perspective Correction을 처리 큐에서 실행하고 Camera Preview를 유지한다. 자동 Curved Correction은 안정성 우선으로 아직 실행하지 않으며 상세 편집에서만 `책/곡면 문서 보정`으로 수동 선택한다.
 - Capture Guide는 화면 비율에서 계산한 normalized 영역으로 전달되고, 검출 결과의 원본 크기가 확인되면 source-pixel Corner로 변환해 session.json에 저장된다. 편집은 사용자 수정 Corner, 자동 검출 Corner, 저장된 Guide Corner 순서로 복원한다.
-- 촬영 완료는 처리 중 장수를 확인한 뒤 Scan Document List를 연다. 목록은 스캔본 썸네일, 전체/개별 선택, Drag & Drop 순서 변경, 상세 Viewer 진입을 제공한다.
+- Camera에는 촬영 완료 버튼을 두지 않는다. 최근 스캔본과 페이지 수 Badge가 PDF Selection Gallery 진입점이며, Gallery Back은 Session을 유지한 Camera로 돌아간다.
+- Gallery는 corrected 우선 대형 반응형 Grid, 전체/개별 선택, 삭제와 상세 Viewer 진입만 제공한다. 선택 snapshot은 현재 Session 순서로 Review에 전달한다.
+- `PdfPageReviewPage`는 선택된 페이지만 담은 자체 배열을 소유한다. Long Press Drag 중에는 route pop과 PDF 실행을 차단하며, 정렬 결과는 Session 배열을 변경하지 않는다. Review Viewer는 선택 snapshot과 자체 PageController만 소유한다.
 - Viewer는 corrected 이미지를 우선 표시하고 없을 때만 raw를 fallback으로 사용한다. `PageView` Swipe, 현재/전체 페이지 표시, 재촬영·편집·삭제만 제공한다.
 - 상세 편집은 원본, Corner, 수동 재보정, 회전을 담당한다. 전체 썸네일과 Drag & Drop 재정렬은 별도 페이지 관리 화면의 책임이다.
 - 재촬영 후보는 Session에 넣기 전에 raw·검출·Perspective 저장을 모두 완료한다. 성공 시에만 기존 위치를 교체하고, 이후 이전 raw/corrected revision을 삭제한다.
 - Recovery에서 이어하기를 선택하면 Camera가 아닌 Scan Result Viewer를 연다.
+
+## PDF Export 계층
+
+- `PdfExportSelection.fromOrderedRawPaths`는 Review가 확정한 `rawImagePath` 순서대로 페이지만 수집한다. PDF 순서는 `pageNo`가 아니라 Review의 최종 배열 순서다.
+- 입력은 `correctedImagePath ?? rawImagePath`로 결정하고, 원본 파일을 변경하지 않은 채 PDF `MemoryImage` orientation으로 0/90/180/270 회전을 적용한다.
+- `PdfPageSizingPolicy.fitImage`는 회전 후 이미지 종횡비를 유지하면서 페이지 자체를 같은 비율로 구성해 왜곡과 불필요한 여백을 피한다. 향후 A4/Letter 정책을 같은 계약에 추가할 수 있다.
+- `DartPdfGenerator`는 별도 isolate에서 페이지 파일을 하나씩 읽고 진행률을 UI로 전달한다. 문서는 앱 임시 디렉터리의 pending PDF로 생성하고 PDF 헤더와 파일 크기를 검증한다.
+- Android `pdf_storage` MethodChannel은 `ACTION_OPEN_DOCUMENT_TREE`로 폴더를 선택하고 persistable read/write URI permission과 최근 URI를 앱 SharedPreferences에 보관한다. `DocumentsContract.createDocument`로 최종 PDF를 생성하며 광범위 저장소 권한은 사용하지 않는다.
+- `PdfExportWorkflow`만 생성 → 임시 파일 검증 → SAF 기록 검증 → `deleteAfterSuccessfulExport()` 순서를 조정한다. 취소나 어느 단계의 실패도 Session 정리를 호출하지 않는다.
+- 저장 성공 후 Page Management를 닫아 기존 Camera Preview로 돌아간다. 다음 촬영은 새 UUID의 ScanSession을 생성한다.
+- Review의 export flow는 버튼 탭 시점부터 단일 guard로 파일명 → 안정 frame → SAF → 안정 frame → 생성 순서를 직렬화한다. SAF 복귀 후 진행 상태는 Dialog route가 아니라 Review 내부 `ModalBarrier` overlay로 표시한다.
+- PDF 성공 시 별도 성공 Dialog를 만들지 않는다. Review가 `true`를 한 번 반환하고 Gallery가 자신의 route만 닫는다. DEBUG 빌드에서는 `[PDF_FLOW]` 로그로 각 단계의 중복 여부를 확인한다.
+- Android SAF 계층은 pending `MethodChannel.Result`를 하나만 보유하고 Activity 결과 수신 전에 참조를 제거한다. picker 실행 실패와 FlutterEngine 정리도 pending result를 정확히 한 번 완료하며 Flutter Navigation에는 관여하지 않는다.
+
+## Navigation과 객체 소유권
+
+- 앱 최상위 flow만 `CameraSession`과 `ScanSessionManager`를 소유하며, 소유권을 명시적으로 전달받은 경우에만 dispose/close한다. Camera, Gallery, Viewer와 Review는 주입받은 manager를 dispose하지 않는다.
+- Viewer의 PageController와 Review Viewer의 PageController는 각 route가 생성하고 같은 route가 dispose한다. Review 정렬 배열과 PDF 진행 ValueNotifier도 Review route만 소유한다.
+- PDF 파일명 입력의 `TextEditingController`는 `PdfFileNameDialog` State가 생성하고, Dialog route의 reverse transition을 포함한 실제 widget teardown 시점의 `State.dispose()`에서 해제한다. 호출자는 Dialog 결과만 받으며 controller를 소유하지 않는다.
+- 0페이지 알림을 받은 비활성 route는 `Navigator.pop`을 실행하지 않는다. 현재 route만 pop하고, 상위 route에는 명시적인 결과를 반환하여 중첩 pop과 route teardown 경쟁을 방지한다.
+
+## DEBUG 진단 계층
+
+- DEBUG 빌드는 `FlutterError.onError`와 `PlatformDispatcher.instance.onError`에서 exception과 전체 stack을 기록하되 기존 Flutter 오류 표시 동작은 그대로 호출한다.
+- 로그는 Application Support의 `debug/scana_debug.log`에 append/flush 방식으로 남기며 Release 빌드에서는 기록과 내보내기를 비활성화한다.
+- 전역 `NavigatorObserver`, Flutter/Android lifecycle, 주요 Scan route와 소유 객체의 init/dispose, PDF 단계, Android SAF 요청 ID와 `MethodChannel.Result` 완료를 같은 파일에서 시간순으로 추적한다.
+- Camera의 DEBUG 전용 `진단 로그 내보내기`는 앱 재시작 뒤에도 누적 로그를 `text/plain` 문서로 내보낸다. 이 경로는 진단 전용이며 PDF 저장 구현을 변경하지 않는다.
+- M7.2.3 실기기 로그에서 최초 오류는 caller가 filename Dialog의 controller를 route teardown보다 먼저 dispose한 것으로 확인됐다. `_dependents.isEmpty`와 Duplicate GlobalKeys는 후속 증상이었으며 SAF 구조는 유지한다.
 
 ## 폴더 책임
 

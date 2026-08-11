@@ -8,6 +8,7 @@ import 'package:scana/features/page_editor/presentation/page_editor_page.dart';
 import 'package:scana/features/camera/presentation/camera_preview_page.dart';
 import 'package:scana/features/scan_result/presentation/scan_result_viewer_page.dart';
 import 'package:scana/features/scan_result/presentation/page_management_page.dart';
+import 'package:scana/features/scan_result/presentation/pdf_page_review_page.dart';
 import 'package:scana/features/scan_session/application/scan_session_manager.dart';
 import 'package:scana/models/document_detection_result.dart';
 import 'package:scana/models/scan_page.dart';
@@ -57,6 +58,304 @@ void main() {
       CameraCaptureButtonLayout.alignmentFor(ScanCaptureMode.spread),
       isNot(Alignment.bottomRight),
     );
+  });
+
+  test('PDF gallery uses at least two responsive columns', () {
+    expect(PdfSelectionGalleryLayout.columnCount(360), 2);
+    expect(PdfSelectionGalleryLayout.columnCount(900), 4);
+  });
+
+  testWidgets('PDF completion is disabled until a gallery page is selected', (
+    tester,
+  ) async {
+    final manager = _viewerManagerWithPages(2);
+    addTearDown(manager.close);
+    await tester.pumpWidget(
+      MaterialApp(home: PageManagementPage(sessionManager: manager)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('pdfSelectionGallery')), findsOneWidget);
+    expect(find.text('0페이지 선택됨'), findsOneWidget);
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.byKey(const Key('reviewSelectedPagesButton')),
+          )
+          .onPressed,
+      isNull,
+    );
+
+    await tester.tap(find.byKey(const ValueKey('pdfGalleryCard-/raw_1.jpg')));
+    await tester.pump();
+
+    expect(find.text('1페이지 선택됨'), findsOneWidget);
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.byKey(const Key('reviewSelectedPagesButton')),
+          )
+          .onPressed,
+      isNotNull,
+    );
+  });
+
+  testWidgets('gallery supports select all and deselect all', (tester) async {
+    final manager = _viewerManagerWithPages(3);
+    addTearDown(manager.close);
+    await tester.pumpWidget(
+      MaterialApp(home: PageManagementPage(sessionManager: manager)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('toggleSelectAllButton')));
+    await tester.pump();
+    expect(find.text('3페이지 선택됨'), findsOneWidget);
+    expect(find.byIcon(Icons.check), findsNWidgets(4));
+
+    await tester.tap(find.byKey(const Key('toggleSelectAllButton')));
+    await tester.pump();
+    expect(find.text('0페이지 선택됨'), findsOneWidget);
+  });
+
+  testWidgets('gallery completion opens review with only selected pages', (
+    tester,
+  ) async {
+    final manager = _viewerManagerWithPages(3);
+    addTearDown(manager.close);
+    await tester.pumpWidget(
+      MaterialApp(home: PageManagementPage(sessionManager: manager)),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('pdfGalleryCard-/raw_1.jpg')));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('pdfGalleryCard-/raw_3.jpg')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('reviewSelectedPagesButton')));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(PdfPageReviewPage), findsOneWidget);
+    expect(find.byKey(const Key('pdfPageReviewGrid')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('pdf-review-card-/raw_1.jpg')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('pdf-review-card-/raw_2.jpg')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('pdf-review-card-/raw_3.jpg')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets(
+    'review back preserves gallery selection across repeated pushes',
+    (tester) async {
+      final manager = _viewerManagerWithPages(2);
+      addTearDown(manager.close);
+      await tester.pumpWidget(
+        MaterialApp(home: PageManagementPage(sessionManager: manager)),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('pdfGalleryCard-/raw_1.jpg')));
+      await tester.pump();
+
+      for (var attempt = 0; attempt < 2; attempt++) {
+        await tester.tap(find.byKey(const Key('reviewSelectedPagesButton')));
+        await tester.pumpAndSettle();
+        expect(find.byType(PdfPageReviewPage), findsOneWidget);
+        await tester.tap(find.byTooltip('Back'));
+        await tester.pumpAndSettle();
+        expect(find.text('1페이지 선택됨'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      }
+    },
+  );
+
+  testWidgets(
+    'review tap keeps order and long press drag updates PDF numbers',
+    (tester) async {
+      final manager = _viewerManagerWithPages(3);
+      addTearDown(manager.close);
+      await tester.pumpWidget(
+        MaterialApp(home: PageManagementPage(sessionManager: manager)),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('toggleSelectAllButton')));
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('reviewSelectedPagesButton')));
+      await tester.pumpAndSettle();
+
+      final firstCard = find.byKey(
+        const ValueKey('pdf-review-card-/raw_1.jpg'),
+      );
+      await tester.tap(firstCard);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('pdfReviewViewer')), findsOneWidget);
+      await tester.tap(find.byTooltip('Back'));
+      await tester.pumpAndSettle();
+      expect(
+        find.descendant(of: firstCard, matching: find.text('1')),
+        findsOneWidget,
+      );
+
+      final thirdCard = find.byKey(
+        const ValueKey('pdf-review-card-/raw_3.jpg'),
+      );
+      final gesture = await tester.startGesture(tester.getCenter(firstCard));
+      await tester.pump(const Duration(milliseconds: 500));
+      await gesture.moveTo(tester.getCenter(thirdCard));
+      await tester.pump();
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      expect(
+        find.descendant(of: firstCard, matching: find.text('3')),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('review blocks duplicate PDF flows before SAF starts', (
+    tester,
+  ) async {
+    final manager = _viewerManagerWithPages(1);
+    addTearDown(manager.close);
+    await tester.pumpWidget(
+      MaterialApp(home: PageManagementPage(sessionManager: manager)),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('toggleSelectAllButton')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('reviewSelectedPagesButton')));
+    await tester.pumpAndSettle();
+
+    final button = tester.widget<FilledButton>(
+      find.byKey(const Key('createReviewedPdfButton')),
+    );
+    button.onPressed!();
+    button.onPressed!();
+    await tester.pump();
+
+    expect(find.text('PDF 파일명'), findsOneWidget);
+    expect(find.byType(AlertDialog), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('injected ScanSessionManager is not disposed by ScanaApp', (
+    tester,
+  ) async {
+    final manager = _viewerManagerWithPages(1);
+    await tester.pumpWidget(ScanaApp(sessionManager: manager));
+    await tester.pumpWidget(const SizedBox.shrink());
+
+    expect(manager.pageCount, 1);
+    await manager.findRecoverableSessions();
+    manager.close();
+  });
+
+  testWidgets('gallery back preserves pages for additional capture', (
+    tester,
+  ) async {
+    final manager = _viewerManagerWithPages(2);
+    addTearDown(manager.close);
+    final navigatorKey = GlobalKey<NavigatorState>();
+    await tester.pumpWidget(
+      MaterialApp(
+        navigatorKey: navigatorKey,
+        home: const Scaffold(body: Text('Camera Preview')),
+      ),
+    );
+    navigatorKey.currentState!.push(
+      MaterialPageRoute<void>(
+        builder: (_) => PageManagementPage(sessionManager: manager),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Back'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Camera Preview'), findsOneWidget);
+    expect(manager.pageCount, 2);
+  });
+
+  testWidgets('gallery reflects pages added by continued capture', (
+    tester,
+  ) async {
+    final manager = _viewerManagerWithPages(1);
+    addTearDown(manager.close);
+    final navigatorKey = GlobalKey<NavigatorState>();
+    await tester.pumpWidget(
+      MaterialApp(
+        navigatorKey: navigatorKey,
+        home: const Scaffold(body: Text('Camera Preview')),
+      ),
+    );
+    navigatorKey.currentState!.push(
+      MaterialPageRoute<void>(
+        builder: (_) => PageManagementPage(sessionManager: manager),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('pdfGalleryCard-/raw_1.jpg')),
+      findsOneWidget,
+    );
+
+    navigatorKey.currentState!.pop();
+    await tester.pumpAndSettle();
+
+    final session = manager.currentSession!;
+    session.addPage(
+      ScanPage(
+        pageNo: 2,
+        rawImagePath: '/raw_2.jpg',
+        createdTime: DateTime.utc(2026, 8, 11),
+      ),
+    );
+    navigatorKey.currentState!.push(
+      MaterialPageRoute<void>(
+        builder: (_) => PageManagementPage(sessionManager: manager),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('pdfGalleryCard-/raw_2.jpg')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('recent scan thumbnail is the gallery entry and shows count', (
+    tester,
+  ) async {
+    var tapped = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Center(
+            child: RecentScanGalleryButton(
+              page: ScanPage(
+                pageNo: 2,
+                rawImagePath: '/missing.jpg',
+                createdTime: DateTime.utc(2026, 8, 11),
+              ),
+              pageCount: 12,
+              onTap: () => tapped = true,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('12'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('recentScanGalleryButton')));
+    expect(tapped, isTrue);
+    expect(find.text('촬영 완료'), findsNothing);
   });
 
   testWidgets('last viewer deletion returns to the camera route', (
@@ -180,6 +479,36 @@ void main() {
     expect(find.text('Camera Preview'), findsOneWidget);
     expect(manager.currentSession, isNotNull);
     expect(manager.pageCount, 0);
+  });
+
+  testWidgets('nested viewer and gallery pop once after last page deletion', (
+    tester,
+  ) async {
+    final manager = _viewerManagerWithPages(1);
+    addTearDown(manager.close);
+    final navigatorKey = GlobalKey<NavigatorState>();
+    await tester.pumpWidget(
+      MaterialApp(
+        navigatorKey: navigatorKey,
+        home: const Scaffold(body: Text('Camera Preview')),
+      ),
+    );
+    navigatorKey.currentState!.push(
+      MaterialPageRoute<void>(
+        builder: (_) => ScanResultViewerPage(sessionManager: manager),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('페이지 관리'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('페이지 삭제'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('삭제').last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Camera Preview'), findsOneWidget);
+    expect(manager.pageCount, 0);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('shows and resumes a recovered session', (tester) async {

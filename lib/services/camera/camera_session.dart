@@ -1,8 +1,11 @@
 import 'package:camera/camera.dart';
+import 'package:scana/services/diagnostics/debug_diagnostics.dart';
 
 /// Owns the initialized camera controller used by the scanning flow.
 class CameraSession {
-  CameraSession._(this.controller);
+  CameraSession._(this.controller) {
+    DebugDiagnostics.instance.log('STATE', 'CameraSession.created');
+  }
 
   final CameraController controller;
   bool _isDisposed = false;
@@ -72,6 +75,7 @@ class CameraSession {
   Future<void> dispose() async {
     if (_isDisposed) return;
     _isDisposed = true;
+    DebugDiagnostics.instance.log('STATE', 'CameraSession.dispose');
     await controller.dispose();
   }
 

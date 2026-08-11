@@ -24,12 +24,16 @@ OpenCV 기반 촬영 이미지 문서 검출, 모서리 Overlay, 수동 Corner �
 
 OpenCV 원근 변환, 경계/inset 기반의 보수적 곡면 평탄화, Guide Corner 영속화와 연속 촬영·Scan Document List·Viewer 중심 UX를 구현한다.
 
+## M7 — PDF Export & Scan Document Workflow
+
+corrected 우선 반응형 선택 Gallery와 별도 PDF Page Review, Long Press Drag 최종 순서, 오프라인 PDF 생성, rotation 적용, 파일명 확인, Android SAF 저장 위치 선택·최근 위치 기억, 진행 상태와 성공 후 Session 정리를 구현한다.
+
 ### Phase 5 고급 기능 (예정)
 
 - 문서 중심 Auto Capture
 - 자동 연속 스캔
 - Camera Preview 실시간 문서 검출
 
-## Phase 7 — 화질 보정과 내보내기
+## Phase 7 — 화질 보정과 OCR
 
-문서 화질 보정, OCR 제목 추천, PDF 생성 및 저장 위치 선택을 구현한다.
+문서 화질 보정과 OCR 제목 추천을 구현한다.
