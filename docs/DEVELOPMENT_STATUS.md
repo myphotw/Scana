@@ -25,8 +25,10 @@
 | M8 화질 보정 | 완료 | Scan Color 기본 자동 처리, 원본·그레이·흑백 수동 전환, enhanced 영속화·fallback |
 | M8 처리 안정성 | 완료 | 단일 background executor, full-resolution 출력, 1200px 분석 map, 명시적 Mat release |
 | M8.1 Paper-aware Scan Color | 완료 | 종이 mask 기반 whitening·비침 억제, text-aware 대비, edge 제한 sharpening, 컬러 보호 |
-| OCR | 미착수 | 향후 단계 |
-| 외부 라이브러리 | 사용 중 | camera, path, path_provider, pdf, uuid, OpenCV |
+| M9 로컬 OCR | 완료 | bundled ML Kit Korean 16.0.1, Review background 제목 제안, 2페이지 fallback |
+| M9 PDF 완료 UX | 완료 | 결과 URI/파일명/크기/페이지 수 보존, 새 스캔·ACTION_VIEW 파일 열기 |
+| 화면 방향 UX | 완료 | Single Camera Portrait, Spread Camera Landscape, Camera 외 작업 화면 Portrait, 외부 Viewer 복귀 재적용 |
+| 외부 라이브러리 | 사용 중 | camera, path, path_provider, pdf, uuid, OpenCV, ML Kit Text Recognition Korean |
 
 ## Known Issues
 

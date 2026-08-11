@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -7,7 +8,11 @@ import 'package:flutter/material.dart';
 import 'package:scana/features/scan_session/application/scan_session_manager.dart';
 import 'package:scana/models/scan_page.dart';
 import 'package:scana/services/diagnostics/debug_diagnostics.dart';
+import 'package:scana/services/ocr/ocr_service.dart';
+import 'package:scana/services/ocr/pdf_title_suggestion_service.dart';
+import 'package:scana/services/pdf_export/pdf_document_opener.dart';
 import 'package:scana/services/pdf_export/pdf_export_service.dart';
+import 'package:scana/services/orientation/screen_orientation_controller.dart';
 
 class PdfReviewGridLayout {
   const PdfReviewGridLayout._();
@@ -24,30 +29,46 @@ class PdfPageReviewPage extends StatefulWidget {
     required this.selectedPages,
     required this.pdfExportWorkflow,
     this.clock = DateTime.now,
+    this.ocrService = const AndroidLocalOcrService(),
+    this.pdfDocumentOpener = const AndroidPdfDocumentOpener(),
+    this.orientationController = const SystemScreenOrientationController(),
   });
 
   final ScanSessionManager sessionManager;
   final List<ScanPage> selectedPages;
   final PdfExportWorkflow pdfExportWorkflow;
   final DateTime Function() clock;
+  final OcrService ocrService;
+  final PdfDocumentOpener pdfDocumentOpener;
+  final ScreenOrientationController orientationController;
 
   @override
   State<PdfPageReviewPage> createState() => _PdfPageReviewPageState();
 }
 
-class _PdfPageReviewPageState extends State<PdfPageReviewPage> {
+class _PdfPageReviewPageState extends State<PdfPageReviewPage>
+    with WidgetsBindingObserver {
   late List<ScanPage> _orderedPages;
   String? _draggingPath;
   bool _exportFlowActive = false;
   bool _isExporting = false;
   PdfExportProgress? _exportProgress;
+  bool _isAnalyzingTitle = true;
+  bool _titleAnalysisFailed = false;
+  String? _suggestedTitle;
+  PdfExportResult? _completionResult;
+  bool _isOpeningDocument = false;
 
   bool get _isDragging => _draggingPath != null;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    unawaited(widget.orientationController.enterContentScreen());
     _orderedPages = List<ScanPage>.of(widget.selectedPages);
+    _suggestedTitle = widget.sessionManager.currentSession?.suggestedTitle;
+    _isAnalyzingTitle = _suggestedTitle == null;
     DebugDiagnostics.instance.logState(
       'PdfPageReviewPage.initState',
       mounted: mounted,
@@ -59,11 +80,13 @@ class _PdfPageReviewPageState extends State<PdfPageReviewPage> {
       _logPdfFlow(
         'review_route_current current=${ModalRoute.of(context)?.isCurrent}',
       );
+      if (_suggestedTitle == null) _analyzeSuggestedTitle();
     });
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     DebugDiagnostics.instance.logState(
       'PdfPageReviewPage.dispose',
       mounted: mounted,
@@ -73,9 +96,20 @@ class _PdfPageReviewPageState extends State<PdfPageReviewPage> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(widget.orientationController.enterContentScreen());
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     return PopScope(
-      canPop: !_isDragging && !_exportFlowActive,
+      canPop:
+          !_isDragging &&
+          !_exportFlowActive &&
+          _completionResult == null &&
+          !_isOpeningDocument,
       child: Scaffold(
         appBar: AppBar(title: const Text('PDF 페이지 확인')),
         body: Stack(
@@ -127,23 +161,55 @@ class _PdfPageReviewPageState extends State<PdfPageReviewPage> {
                       ),
                 ),
               ),
+            if (_completionResult case final completion?)
+              Positioned.fill(
+                child: _PdfCompletionOverlay(
+                  result: completion,
+                  openingDocument: _isOpeningDocument,
+                  onNewScan: _startNewScan,
+                  onOpenFile: _openSavedPdf,
+                ),
+              ),
           ],
         ),
         bottomNavigationBar: SafeArea(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-            child: FilledButton.icon(
-              key: const Key('createReviewedPdfButton'),
-              onPressed: _isDragging || _exportFlowActive
-                  ? null
-                  : _startPdfExport,
-              icon: const Icon(Icons.picture_as_pdf_outlined),
-              label: Text('${_orderedPages.length}페이지 PDF 만들기'),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  _titleStatusText,
+                  key: const Key('pdfTitleSuggestionStatus'),
+                  style: Theme.of(context).textTheme.bodySmall,
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 8),
+                FilledButton.icon(
+                  key: const Key('createReviewedPdfButton'),
+                  onPressed:
+                      _isDragging ||
+                          _exportFlowActive ||
+                          _completionResult != null
+                      ? null
+                      : _startPdfExport,
+                  icon: const Icon(Icons.picture_as_pdf_outlined),
+                  label: Text('${_orderedPages.length}페이지 PDF 만들기'),
+                ),
+              ],
             ),
           ),
         ),
       ),
     );
+  }
+
+  String get _titleStatusText {
+    if (_isAnalyzingTitle) return '제목 분석 중...';
+    if (_suggestedTitle case final title?) return '제안 제목: $title';
+    if (_titleAnalysisFailed) return '제목을 찾지 못해 날짜 기반 이름을 사용합니다.';
+    return '날짜 기반 파일명을 사용합니다.';
   }
 
   void _movePage(String rawPath, int targetIndex) {
@@ -237,8 +303,8 @@ class _PdfPageReviewPageState extends State<PdfPageReviewPage> {
       if (!await _yieldToStableFrame()) return;
       if (!mounted) return;
       routeCompleted = true;
-      _logPdfFlow('review_pop');
-      Navigator.of(context).pop(true);
+      setState(() => _completionResult = result);
+      _logPdfFlow('completion_visible uri=${result.documentUri ?? ''}');
     } on Object catch (error) {
       _logPdfFlow('export_failed error=$error');
       if (mounted) {
@@ -277,7 +343,9 @@ class _PdfPageReviewPageState extends State<PdfPageReviewPage> {
     return showDialog<String>(
       context: context,
       builder: (context) => PdfFileNameDialog(
-        initialFileName: PdfFileNamePolicy.defaultBaseName(widget.clock()),
+        initialFileName:
+            _suggestedTitle ??
+            PdfFileNamePolicy.defaultBaseName(widget.clock()),
       ),
     );
   }
@@ -329,6 +397,60 @@ class _PdfPageReviewPageState extends State<PdfPageReviewPage> {
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _analyzeSuggestedTitle() async {
+    final suggestionService = PdfTitleSuggestionService(
+      ocrService: widget.ocrService,
+    );
+    final suggestion = await suggestionService.suggest(
+      List<ScanPage>.of(_orderedPages),
+    );
+    if (!mounted || _completionResult != null) return;
+    if (suggestion == null) {
+      setState(() {
+        _isAnalyzingTitle = false;
+        _titleAnalysisFailed = true;
+      });
+      return;
+    }
+    try {
+      await widget.sessionManager.updateSuggestedTitle(
+        suggestion.title,
+        sourcePageNo: suggestion.sourcePageNo,
+      );
+    } on Object {
+      // The in-memory suggestion is still usable if persistence races export.
+    }
+    if (!mounted || _completionResult != null) return;
+    setState(() {
+      _suggestedTitle = suggestion.title;
+      _isAnalyzingTitle = false;
+      _titleAnalysisFailed = false;
+    });
+  }
+
+  void _startNewScan() {
+    if (_completionResult == null || _isOpeningDocument) return;
+    _logPdfFlow('completion_new_scan');
+    Navigator.of(context).pop(true);
+  }
+
+  Future<void> _openSavedPdf() async {
+    final documentUri = _completionResult?.documentUri;
+    if (documentUri == null || _isOpeningDocument) return;
+    setState(() => _isOpeningDocument = true);
+    try {
+      final openResult = await widget.pdfDocumentOpener.open(documentUri);
+      if (!mounted) return;
+      if (openResult == PdfOpenResult.noViewer) {
+        _showPdfError('PDF를 열 수 있는 앱이 없습니다.');
+      }
+    } on Object {
+      if (mounted) _showPdfError('PDF를 열 수 있는 앱이 없습니다.');
+    } finally {
+      if (mounted) setState(() => _isOpeningDocument = false);
+    }
   }
 }
 
@@ -625,6 +747,89 @@ class _PdfExportOverlay extends StatelessWidget {
                 const SizedBox(width: 220, child: LinearProgressIndicator()),
                 const SizedBox(height: 16),
                 Text('${progress.completed} / ${progress.total} 페이지'),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _PdfCompletionOverlay extends StatelessWidget {
+  const _PdfCompletionOverlay({
+    required this.result,
+    required this.openingDocument,
+    required this.onNewScan,
+    required this.onOpenFile,
+  });
+
+  final PdfExportResult result;
+  final bool openingDocument;
+  final VoidCallback onNewScan;
+  final VoidCallback onOpenFile;
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      key: const Key('pdfCompletionOverlay'),
+      alignment: Alignment.center,
+      children: [
+        const ModalBarrier(dismissible: false, color: Colors.black54),
+        Card(
+          margin: const EdgeInsets.all(24),
+          elevation: 10,
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.check_circle,
+                  size: 52,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  'PDF 저장 완료',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  result.displayName ?? '',
+                  key: const Key('pdfCompletionDisplayName'),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 4),
+                Text('${result.pageCount ?? 0}페이지'),
+                const SizedBox(height: 20),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        key: const Key('startNewScanButton'),
+                        onPressed: openingDocument ? null : onNewScan,
+                        child: const Text('새 스캔'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: FilledButton.icon(
+                        key: const Key('openSavedPdfButton'),
+                        onPressed: openingDocument ? null : onOpenFile,
+                        icon: openingDocument
+                            ? const SizedBox.square(
+                                dimension: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.open_in_new),
+                        label: const Text('파일 열기'),
+                      ),
+                    ),
+                  ],
+                ),
               ],
             ),
           ),

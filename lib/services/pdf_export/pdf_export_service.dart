@@ -143,16 +143,19 @@ class PdfFileNamePolicy {
     if (value.toLowerCase().endsWith('.pdf')) {
       value = value.substring(0, value.length - 4).trim();
     }
-    value = value
-        .replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1f]'), '_')
-        .replaceAll(RegExp(r'[. ]+$'), '')
-        .trim();
+    value = sanitizeBaseName(value);
     if (value.isEmpty) {
       throw const FormatException('PDF file name is empty.');
     }
     if (value.length > 120) value = value.substring(0, 120).trimRight();
     return '$value.pdf';
   }
+
+  static String sanitizeBaseName(String input) => input
+      .replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1f]'), '_')
+      .replaceAll(RegExp(r'[. ]+$'), '')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
 }
 
 class PdfExportProgress {
@@ -325,15 +328,27 @@ abstract interface class PdfDestinationStorage {
 enum PdfExportStatus { success, cancelled }
 
 class PdfExportResult {
-  const PdfExportResult._({required this.status, this.savedDocument});
+  const PdfExportResult._({
+    required this.status,
+    this.savedDocument,
+    this.pageCount,
+  });
 
   const PdfExportResult.cancelled() : this._(status: PdfExportStatus.cancelled);
 
-  const PdfExportResult.success(PdfSavedDocument document)
-    : this._(status: PdfExportStatus.success, savedDocument: document);
+  const PdfExportResult.success(
+    PdfSavedDocument document, {
+    required this.pageCount,
+  }) : status = PdfExportStatus.success,
+       savedDocument = document;
 
   final PdfExportStatus status;
   final PdfSavedDocument? savedDocument;
+  final int? pageCount;
+
+  String? get documentUri => savedDocument?.uri;
+  String? get displayName => savedDocument?.displayName;
+  int? get byteLength => savedDocument?.byteCount;
 }
 
 typedef TemporaryDirectoryProvider = Future<Directory> Function();
@@ -394,7 +409,7 @@ class PdfExportWorkflow {
         throw const FileSystemException('Saved PDF is empty.');
       }
       await deleteAfterSuccessfulExport();
-      return PdfExportResult.success(saved);
+      return PdfExportResult.success(saved, pageCount: selection.pages.length);
     } finally {
       if (await temporaryPdf.exists()) await temporaryPdf.delete();
     }

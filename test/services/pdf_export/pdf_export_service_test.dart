@@ -285,6 +285,10 @@ void main() {
 
       expect(result.status, PdfExportStatus.success);
       expect(result.savedDocument!.displayName, '회의자료.pdf');
+      expect(result.documentUri, 'content://saved/회의자료.pdf');
+      expect(result.displayName, '회의자료.pdf');
+      expect(result.byteLength, greaterThan(0));
+      expect(result.pageCount, 1);
       expect(events, ['generate', 'save', 'cleanup']);
     },
   );

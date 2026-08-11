@@ -9,6 +9,7 @@ import 'package:scana/models/scan_session.dart';
 import 'package:scana/services/camera/camera_session.dart';
 import 'package:scana/services/storage/scan_session_storage.dart';
 import 'package:scana/services/diagnostics/debug_diagnostics.dart';
+import 'package:scana/services/orientation/screen_orientation_controller.dart';
 
 /// Root application shell for Scana.
 class ScanaApp extends StatefulWidget {
@@ -19,6 +20,7 @@ class ScanaApp extends StatefulWidget {
     this.recoverySession,
     this.ownsInjectedCameraSession = false,
     this.ownsInjectedSessionManager = false,
+    this.orientationController = const SystemScreenOrientationController(),
   });
 
   final CameraStartup? cameraStartup;
@@ -26,6 +28,7 @@ class ScanaApp extends StatefulWidget {
   final ScanSession? recoverySession;
   final bool ownsInjectedCameraSession;
   final bool ownsInjectedSessionManager;
+  final ScreenOrientationController orientationController;
 
   @override
   State<ScanaApp> createState() => _ScanaAppState();
@@ -59,6 +62,7 @@ class _ScanaAppState extends State<ScanaApp> {
       _sessionManager.close();
     }
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    unawaited(widget.orientationController.restoreSystemDefault());
     super.dispose();
   }
 
@@ -76,6 +80,7 @@ class _ScanaAppState extends State<ScanaApp> {
         cameraStartup: widget.cameraStartup,
         sessionManager: _sessionManager,
         recoverySession: widget.recoverySession,
+        orientationController: widget.orientationController,
       ),
     );
   }

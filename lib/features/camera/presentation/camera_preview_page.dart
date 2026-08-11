@@ -17,6 +17,7 @@ import 'package:scana/models/scan_capture_mode.dart';
 import 'package:scana/services/camera/camera_session.dart';
 import 'package:scana/services/image_processing/live_document_detection.dart';
 import 'package:scana/services/diagnostics/debug_diagnostics.dart';
+import 'package:scana/services/orientation/screen_orientation_controller.dart';
 
 /// Full-screen camera entry point for the document scanning flow.
 class CameraPreviewPage extends StatefulWidget {
@@ -27,6 +28,7 @@ class CameraPreviewPage extends StatefulWidget {
     this.recoverySession,
     this.replacementPageIndex,
     this.previewDocumentDetector,
+    this.orientationController = const SystemScreenOrientationController(),
   });
 
   final CameraStartup? cameraStartup;
@@ -34,6 +36,7 @@ class CameraPreviewPage extends StatefulWidget {
   final ScanSession? recoverySession;
   final int? replacementPageIndex;
   final PreviewDocumentDetector? previewDocumentDetector;
+  final ScreenOrientationController orientationController;
 
   @override
   State<CameraPreviewPage> createState() => _CameraPreviewPageState();
@@ -57,7 +60,9 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
           const OpenCvPreviewDocumentDetector(),
     );
     WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _applyCaptureOrientation(widget.sessionManager.captureMode);
       await _showRecoveryPrompt();
+      if (!mounted) return;
       await _applyCaptureOrientation(widget.sessionManager.captureMode);
       await _startPreviewAnalysis();
     });
@@ -119,15 +124,17 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
         case _RecoveryAction.resume:
           widget.sessionManager.restoreSession(recoverySession);
           if (recoverySession.pages.isNotEmpty && mounted) {
+            await widget.orientationController.enterContentScreen();
+            if (!mounted) return;
             await Navigator.of(context).push(
               MaterialPageRoute<void>(
                 builder: (context) => PageManagementPage(
                   sessionManager: widget.sessionManager,
                   cameraStartup: widget.cameraStartup,
+                  orientationController: widget.orientationController,
                 ),
               ),
             );
-            if (mounted) unawaited(_startPreviewAnalysis());
           }
           break;
         case _RecoveryAction.delete:
@@ -243,14 +250,9 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
   }
 
   Future<void> _applyCaptureOrientation(ScanCaptureMode mode) {
-    return SystemChrome.setPreferredOrientations(
-      mode == ScanCaptureMode.spread
-          ? const [
-              DeviceOrientation.landscapeLeft,
-              DeviceOrientation.landscapeRight,
-            ]
-          : DeviceOrientation.values,
-    );
+    return mode == ScanCaptureMode.spread
+        ? widget.orientationController.enterSpreadCamera()
+        : widget.orientationController.enterSingleCamera();
   }
 
   void _showCaptureError() {
@@ -431,15 +433,20 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
   Future<void> _openGallery() async {
     await _stopPreviewAnalysis();
     if (!mounted) return;
+    await widget.orientationController.enterContentScreen();
+    if (!mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (context) => PageManagementPage(
           sessionManager: widget.sessionManager,
           cameraStartup: widget.cameraStartup,
+          orientationController: widget.orientationController,
         ),
       ),
     );
-    if (mounted) unawaited(_startPreviewAnalysis());
+    if (!mounted) return;
+    await _applyCaptureOrientation(widget.sessionManager.captureMode);
+    unawaited(_startPreviewAnalysis());
   }
 
   @override
@@ -449,7 +456,6 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
       mounted: mounted,
     );
     unawaited(_stopPreviewAnalysis());
-    unawaited(SystemChrome.setPreferredOrientations(DeviceOrientation.values));
     _liveDetection.dispose();
     super.dispose();
   }

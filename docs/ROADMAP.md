@@ -42,6 +42,12 @@ Recovery의 기본 진입점을 PDF Selection Gallery로 변경하고, OpenCV �
 - 자동 연속 스캔
 - Camera Preview 실시간 문서 검출
 
-## Phase 7 — OCR
+## M9 — OCR Auto Title & PDF Completion UX
 
-OCR 제목 추천을 구현한다.
+bundled Korean on-device OCR의 첫/두 번째 PDF 페이지 제목 제안, Session 재사용, 날짜 fallback, PDF 저장 결과 보존, Review 내부 완료 UX와 Android PDF Viewer 열기를 구현한다.
+
+Camera 역할 기반 방향 정책을 추가해 Single은 Portrait, Spread는 Landscape를 사용하고 Gallery·Viewer·Editor·PDF flow는 Portrait으로 고정한다.
+
+## 향후 OCR
+
+Searchable PDF text layer, 전체 페이지 OCR, OCR 검색은 M9 범위에서 제외한다.

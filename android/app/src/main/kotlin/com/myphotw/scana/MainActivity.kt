@@ -11,6 +11,7 @@ import com.myphotw.scana.imageprocessing.OpenCvDocumentDetector
 import com.myphotw.scana.imageprocessing.OpenCvPageCorrector
 import com.myphotw.scana.imageprocessing.OpenCvPageCorrector.CurvedCorrectionException
 import com.myphotw.scana.imageprocessing.OpenCvPageEnhancer
+import com.myphotw.scana.ocr.AndroidLocalOcrService
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -22,7 +23,10 @@ class MainActivity : FlutterActivity() {
     private var detectorChannel: MethodChannel? = null
     private var correctorChannel: MethodChannel? = null
     private var enhancerChannel: MethodChannel? = null
+    private var ocrChannel: MethodChannel? = null
+    private var localOcrService: AndroidLocalOcrService? = null
     private var pdfStorageChannel: MethodChannel? = null
+    private var pdfDocumentChannel: MethodChannel? = null
     private var debugDiagnosticsChannel: MethodChannel? = null
     private var pendingDirectoryResult: MethodChannel.Result? = null
     private var pendingDirectoryRequestId: Long? = null
@@ -235,6 +239,59 @@ class MainActivity : FlutterActivity() {
                     }
                 }
             }
+        localOcrService = AndroidLocalOcrService()
+        ocrChannel =
+            MethodChannel(
+                flutterEngine.dartExecutor.binaryMessenger,
+                LOCAL_OCR_CHANNEL,
+            ).also { channel ->
+                channel.setMethodCallHandler { call, result ->
+                    if (call.method != "recognizeText") {
+                        result.notImplemented()
+                        return@setMethodCallHandler
+                    }
+                    val imagePath = call.argument<String>("imagePath")
+                    val sourcePageId = call.argument<String>("sourcePageId")
+                    val service = localOcrService
+                    if (imagePath.isNullOrBlank() ||
+                        sourcePageId.isNullOrBlank() ||
+                        service == null
+                    ) {
+                        result.error(
+                            "invalid_ocr_arguments",
+                            "OCR arguments are invalid.",
+                            null,
+                        )
+                        return@setMethodCallHandler
+                    }
+                    debugLog("OCR", "recognition_start source=$sourcePageId")
+                    service.recognize(
+                        imagePath = imagePath,
+                        sourcePageId = sourcePageId,
+                        onSuccess = { value ->
+                            debugLog(
+                                "OCR",
+                                "recognition_complete source=$sourcePageId " +
+                                    "blocks=${(value["blocks"] as? List<*>)?.size ?: 0}",
+                            )
+                            runOnUiThread { result.success(value) }
+                        },
+                        onFailure = { error ->
+                            debugLog(
+                                "OCR",
+                                "recognition_failed source=$sourcePageId error=${error.message}",
+                            )
+                            runOnUiThread {
+                                result.error(
+                                    "ocr_failed",
+                                    error.message ?: "Text recognition failed.",
+                                    null,
+                                )
+                            }
+                        },
+                    )
+                }
+            }
         pdfStorageChannel =
             MethodChannel(
                 flutterEngine.dartExecutor.binaryMessenger,
@@ -309,6 +366,39 @@ class MainActivity : FlutterActivity() {
                             }
                         }
                         else -> result.notImplemented()
+                    }
+                }
+            }
+        pdfDocumentChannel =
+            MethodChannel(
+                flutterEngine.dartExecutor.binaryMessenger,
+                PDF_DOCUMENT_CHANNEL,
+            ).also { channel ->
+                channel.setMethodCallHandler { call, result ->
+                    if (call.method != "openPdf") {
+                        result.notImplemented()
+                        return@setMethodCallHandler
+                    }
+                    val documentUri = call.argument<String>("documentUri")
+                    if (documentUri.isNullOrBlank()) {
+                        result.error("invalid_pdf_uri", "A PDF URI is required.", null)
+                        return@setMethodCallHandler
+                    }
+                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(Uri.parse(documentUri), "application/pdf")
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    val canOpen = intent.resolveActivity(packageManager) != null
+                    if (!canOpen) {
+                        result.success(mapOf("opened" to false))
+                        return@setMethodCallHandler
+                    }
+                    try {
+                        startActivity(Intent.createChooser(intent, "PDF 파일 열기"))
+                        result.success(mapOf("opened" to true))
+                    } catch (error: Throwable) {
+                        debugLog("PDF_VIEWER", "open_failed error=${error.message}")
+                        result.success(mapOf("opened" to false))
                     }
                 }
             }
@@ -413,8 +503,14 @@ class MainActivity : FlutterActivity() {
         correctorChannel = null
         enhancerChannel?.setMethodCallHandler(null)
         enhancerChannel = null
+        ocrChannel?.setMethodCallHandler(null)
+        ocrChannel = null
+        localOcrService?.close()
+        localOcrService = null
         pdfStorageChannel?.setMethodCallHandler(null)
         pdfStorageChannel = null
+        pdfDocumentChannel?.setMethodCallHandler(null)
+        pdfDocumentChannel = null
         debugDiagnosticsChannel?.setMethodCallHandler(null)
         debugDiagnosticsChannel = null
         val directoryRequestId = pendingDirectoryRequestId
@@ -643,7 +739,9 @@ class MainActivity : FlutterActivity() {
         const val DOCUMENT_DETECTOR_CHANNEL = "com.myphotw.scana/document_detector"
         const val PAGE_CORRECTOR_CHANNEL = "com.myphotw.scana/page_corrector"
         const val PAGE_ENHANCER_CHANNEL = "com.myphotw.scana/page_enhancer"
+        const val LOCAL_OCR_CHANNEL = "com.myphotw.scana/local_ocr"
         const val PDF_STORAGE_CHANNEL = "com.myphotw.scana/pdf_storage"
+        const val PDF_DOCUMENT_CHANNEL = "com.myphotw.scana/pdf_document"
         const val DEBUG_DIAGNOSTICS_CHANNEL = "com.myphotw.scana/debug_diagnostics"
         const val PDF_PREFERENCES = "scana_pdf_storage"
         const val PREF_RECENT_DIRECTORY = "recent_directory_uri"

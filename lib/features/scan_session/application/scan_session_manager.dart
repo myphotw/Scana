@@ -650,6 +650,17 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
     return enhanced.enhancementStatus == EnhancementStatus.completed;
   }
 
+  Future<void> updateSuggestedTitle(
+    String title, {
+    required int sourcePageNo,
+  }) async {
+    _ensureOpen();
+    final session = _requireSession();
+    session.updateSuggestedTitle(title, sourcePageNo);
+    await _storage.saveSession(session);
+    notifyListeners();
+  }
+
   @override
   Future<void> cancelSession() async {
     final session = _currentSession;

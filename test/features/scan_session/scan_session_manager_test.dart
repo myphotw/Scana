@@ -92,6 +92,40 @@ void main() {
     expect(await sessionDirectory.exists(), isFalse);
   });
 
+  test('OCR title suggestion persists and survives session recovery', () async {
+    await manager.addRawCapture(
+      (await _createCapture(testRoot, 'title-source.jpg')).path,
+    );
+
+    await manager.updateSuggestedTitle('사내 품질관리 프로세스 개선안', sourcePageNo: 1);
+
+    final metadata =
+        jsonDecode(
+              await File(
+                path.join(
+                  testRoot.path,
+                  'scan_sessions',
+                  'session-uuid',
+                  'session.json',
+                ),
+              ).readAsString(),
+            )
+            as Map<String, dynamic>;
+    expect(metadata['suggestedTitle'], '사내 품질관리 프로세스 개선안');
+    expect(metadata['ocrSourcePageNo'], 1);
+
+    manager.close();
+    manager = ScanSessionManager(
+      storage: AppPrivateSessionStorage(
+        appPrivateDirectoryProvider: () async => testRoot,
+      ),
+    );
+    final recovered = (await manager.findRecoverableSessions()).single;
+
+    expect(recovered.suggestedTitle, '사내 품질관리 프로세스 개선안');
+    expect(recovered.ocrSourcePageNo, 1);
+  });
+
   test(
     'deleting the last page keeps the session ready for another capture',
     () async {

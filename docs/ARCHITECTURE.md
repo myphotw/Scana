@@ -6,14 +6,14 @@
 
 ## 처리 흐름
 
-카메라 프리뷰 → 촬영 가이드 → ScanSession → 원본 저장 → 문서 검출 → 자동 원근 보정 → 자동 Scan Color 화질 보정 → Gallery/Viewer → (상세 편집 또는 페이지 관리) → 선택적 곡면·화질 재보정 → PDF Review → PDF 생성 → 사용자 지정 위치 저장
+카메라 프리뷰 → 촬영 가이드 → ScanSession → 원본 저장 → 문서 검출 → 자동 원근 보정 → 자동 Scan Color 화질 보정 → Gallery/Viewer → (상세 편집 또는 페이지 관리) → PDF Review → 선택 첫 페이지 OCR 제목 제안 → PDF 생성 → 사용자 지정 위치 저장 → 완료 확인/파일 열기
 
 촬영 직후 PDF를 만들지 않는다. 원본과 각 보정 단계의 결과를 분리해 재편집과 재촬영을 지원한다.
 
 ## ScanSession 영속화
 
 - 작업 파일은 앱 전용 영속 디렉터리의 `scan_sessions/<session_uuid>/`에 저장한다.
-- `session.json`에는 Session ID, 생성 시간, 페이지 배열 순서, raw/corrected/enhanced 상대 파일명, 페이지 번호, 생성 시간, 회전, 원본 크기, 선택적 문서 모서리 좌표, 원근·곡면 보정 상태와 화질 보정 모드·상태를 저장한다.
+- `session.json`에는 Session ID, 생성 시간, 페이지 배열 순서, raw/corrected/enhanced 상대 파일명, 페이지 번호, 생성 시간, 회전, 원본 크기, 선택적 문서 모서리 좌표, 보정 상태와 선택적 `suggestedTitle`/`ocrSourcePageNo`를 저장한다.
 - JSON에는 절대 경로를 기록하지 않는다. 런타임에 Session 디렉터리와 상대 파일명을 결합한다.
 - Recovery는 `session.json`을 우선 사용하고, 없거나 손상된 경우에만 `raw_*.jpg`를 탐색해 복구한다.
 - 취소와 향후 PDF 저장 성공 시에만 Session 디렉터리를 삭제한다.
@@ -65,6 +65,15 @@
 - 재촬영 후보는 Session에 넣기 전에 raw·검출·Perspective 저장을 모두 완료한다. 성공 시에만 기존 위치를 교체하고, 이후 이전 raw/corrected revision을 삭제한다.
 - Recovery에서 이어하기를 선택하면 PDF Selection Gallery를 연다. 삭제 후 새 스캔은 Session을 제거하고 Camera로, Gallery Back은 Session을 유지한 Camera로 이동한다.
 
+## OCR 제목 제안 계층
+
+- Flutter의 `OcrService` 계약과 `AndroidLocalOcrService` MethodChannel 구현을 분리해 Review UI가 ML Kit API에 직접 의존하지 않는다.
+- Android는 bundled Google ML Kit Text Recognition v2 Korean 모델을 사용한다. 전용 단일 background executor가 최대 변 2048px로 축소 decode한 후 ML Kit task 완료를 기다리며, Bitmap은 성공·실패 경로에서 즉시 recycle한다. 모델 다운로드나 클라우드 전송은 없다.
+- `OcrResult` → block → line 모델은 원문, 좌표, 선택 confidence·language, source page/dimension을 보존해 향후 searchable PDF를 추가할 수 있게 한다. M9에서는 제목 추출에만 사용한다.
+- Review 진입 후 background 제안을 시작하고, 정렬·미리보기·PDF 버튼은 유지한다. 첫 페이지 인식/제목 추출이 실패하면 두 번째 페이지를 한 번만 시도한다.
+- `PdfTitleExtractor`는 상단 거리·글자 높이·짧은 제목 길이·confidence를 score로 사용하고 숫자, 페이지 번호, 날짜, 긴 문장을 제외한다. 결과는 50자로 제한한 후 PDF 파일명 정책으로 sanitize한다.
+- 인식 실패는 정상적인 optional 상태이며 `Scana_yyyyMMdd_HHmm` fallback으로 PDF 생성을 계속한다. 성공한 제안만 Session에 저장해 Recovery 후 재사용한다.
+
 ## PDF Export 계층
 
 - `PdfExportSelection.fromOrderedRawPaths`는 Review가 확정한 `rawImagePath` 순서대로 페이지만 수집한다. PDF 순서는 `pageNo`가 아니라 Review의 최종 배열 순서다.
@@ -73,9 +82,10 @@
 - `DartPdfGenerator`는 별도 isolate에서 페이지 파일을 하나씩 읽고 진행률을 UI로 전달한다. 문서는 앱 임시 디렉터리의 pending PDF로 생성하고 PDF 헤더와 파일 크기를 검증한다.
 - Android `pdf_storage` MethodChannel은 `ACTION_OPEN_DOCUMENT_TREE`로 폴더를 선택하고 persistable read/write URI permission과 최근 URI를 앱 SharedPreferences에 보관한다. `DocumentsContract.createDocument`로 최종 PDF를 생성하며 광범위 저장소 권한은 사용하지 않는다.
 - `PdfExportWorkflow`만 생성 → 임시 파일 검증 → SAF 기록 검증 → `deleteAfterSuccessfulExport()` 순서를 조정한다. 취소나 어느 단계의 실패도 Session 정리를 호출하지 않는다.
-- 저장 성공 후 Page Management를 닫아 기존 Camera Preview로 돌아간다. 다음 촬영은 새 UUID의 ScanSession을 생성한다.
+- `PdfExportResult`는 Session 삭제 후에도 `documentUri`, `displayName`, `byteLength`, `pageCount`를 유지한다.
 - Review의 export flow는 버튼 탭 시점부터 단일 guard로 파일명 → 안정 frame → SAF → 안정 frame → 생성 순서를 직렬화한다. SAF 복귀 후 진행 상태는 Dialog route가 아니라 Review 내부 `ModalBarrier` overlay로 표시한다.
-- PDF 성공 시 별도 성공 Dialog를 만들지 않는다. Review가 `true`를 한 번 반환하고 Gallery가 자신의 route만 닫는다. DEBUG 빌드에서는 `[PDF_FLOW]` 로그로 각 단계의 중복 여부를 확인한다.
+- PDF 성공 시 Review 내부 완료 overlay가 파일명·페이지 수와 `새 스캔`/`파일 열기`를 표시한다. `새 스캔`을 누를 때만 Review → Gallery → Camera를 정리하며 다음 촬영은 새 UUID를 사용한다.
+- Android `pdf_document` MethodChannel은 SAF content URI를 `ACTION_VIEW`, `application/pdf`, `FLAG_GRANT_READ_URI_PERMISSION`으로 연다. Viewer가 없거나 열기가 실패해도 완료 overlay와 저장 결과를 유지한다.
 - Android SAF 계층은 pending `MethodChannel.Result`를 하나만 보유하고 Activity 결과 수신 전에 참조를 제거한다. picker 실행 실패와 FlutterEngine 정리도 pending result를 정확히 한 번 완료하며 Flutter Navigation에는 관여하지 않는다.
 
 ## Navigation과 객체 소유권
@@ -84,6 +94,13 @@
 - Viewer의 PageController와 Review Viewer의 PageController는 각 route가 생성하고 같은 route가 dispose한다. Review 정렬 배열과 PDF 진행 ValueNotifier도 Review route만 소유한다.
 - PDF 파일명 입력의 `TextEditingController`는 `PdfFileNameDialog` State가 생성하고, Dialog route의 reverse transition을 포함한 실제 widget teardown 시점의 `State.dispose()`에서 해제한다. 호출자는 Dialog 결과만 받으며 controller를 소유하지 않는다.
 - 0페이지 알림을 받은 비활성 route는 `Navigator.pop`을 실행하지 않는다. 현재 route만 pop하고, 상위 route에는 명시적인 결과를 반환하여 중첩 pop과 route teardown 경쟁을 방지한다.
+
+## 화면 방향 계층
+
+- `ScreenOrientationController`가 Single Camera=Portrait Up, Spread Camera=Landscape Left/Right, Content=Portrait Up 정책을 한 곳에서 관리한다. 각 화면은 `SystemChrome` 상수를 직접 복제하지 않는다.
+- Camera는 Gallery route를 push하기 전 Content Portrait 요청을 await해 첫 Gallery frame이 Landscape로 그려지는 flicker를 줄인다. Gallery가 pop되면 다시 현재 `ScanSessionManager.captureMode`를 읽어 Camera 방향을 복원한 후 기존 Preview analysis만 재개한다.
+- Gallery, Scan Result Viewer, Page Editor, PDF Review는 진입 시 Content Portrait을 요청한다. Review는 app lifecycle `resumed`에서도 Portrait을 재적용해 외부 PDF Viewer가 Scana 방향을 변경하지 못하게 한다.
+- 방향 전환은 CameraSession/CameraController를 재생성하지 않는다. 현재 새 Session 정책은 직전 capture mode를 메모리에 유지하므로 Spread PDF 완료 후 `새 스캔`도 Landscape Camera로 복귀한다.
 
 ## DEBUG 진단 계층
 

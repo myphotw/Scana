@@ -17,6 +17,7 @@ import 'package:scana/models/page_correction.dart';
 import 'package:scana/models/scan_capture_mode.dart';
 import 'package:scana/models/page_enhancement.dart';
 import 'package:scana/services/storage/scan_session_storage.dart';
+import 'package:scana/services/orientation/screen_orientation_controller.dart';
 
 void main() {
   testWidgets('creates the Scana camera entry screen', (tester) async {
@@ -442,7 +443,11 @@ void main() {
     );
 
     await tester.pumpWidget(
-      ScanaApp(sessionManager: manager, recoverySession: emptySession),
+      ScanaApp(
+        sessionManager: manager,
+        recoverySession: emptySession,
+        orientationController: _NoopOrientationController(),
+      ),
     );
     await tester.pumpAndSettle();
     await tester.tap(find.text('이어하기'));
@@ -529,7 +534,11 @@ void main() {
     final manager = ScanSessionManager(storage: _TestSessionStorage());
 
     await tester.pumpWidget(
-      ScanaApp(sessionManager: manager, recoverySession: session),
+      ScanaApp(
+        sessionManager: manager,
+        recoverySession: session,
+        orientationController: _NoopOrientationController(),
+      ),
     );
     await tester.pumpAndSettle();
 
@@ -567,7 +576,11 @@ void main() {
     addTearDown(manager.close);
 
     await tester.pumpWidget(
-      ScanaApp(sessionManager: manager, recoverySession: session),
+      ScanaApp(
+        sessionManager: manager,
+        recoverySession: session,
+        orientationController: _NoopOrientationController(),
+      ),
     );
     await tester.pumpAndSettle();
     await tester.tap(find.text('삭제 후 새 스캔'));
@@ -840,4 +853,18 @@ class _TestSessionStorage implements ScanSessionStorage {
   }) {
     throw UnimplementedError();
   }
+}
+
+class _NoopOrientationController implements ScreenOrientationController {
+  @override
+  Future<void> enterContentScreen() async {}
+
+  @override
+  Future<void> enterSingleCamera() async {}
+
+  @override
+  Future<void> enterSpreadCamera() async {}
+
+  @override
+  Future<void> restoreSystemDefault() async {}
 }

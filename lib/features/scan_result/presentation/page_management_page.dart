@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -14,6 +15,9 @@ import 'package:scana/services/camera/camera_session.dart';
 import 'package:scana/services/pdf_export/pdf_export_service.dart';
 import 'package:scana/services/pdf_export/pdf_saf_storage.dart';
 import 'package:scana/services/diagnostics/debug_diagnostics.dart';
+import 'package:scana/services/ocr/ocr_service.dart';
+import 'package:scana/services/pdf_export/pdf_document_opener.dart';
+import 'package:scana/services/orientation/screen_orientation_controller.dart';
 
 class PdfSelectionGalleryLayout {
   const PdfSelectionGalleryLayout._();
@@ -29,13 +33,19 @@ class PageManagementPage extends StatefulWidget {
     required this.sessionManager,
     this.cameraStartup,
     this.pdfExportWorkflow,
+    this.ocrService,
+    this.pdfDocumentOpener,
     this.clock = DateTime.now,
+    this.orientationController = const SystemScreenOrientationController(),
   });
 
   final ScanSessionManager sessionManager;
   final CameraStartup? cameraStartup;
   final PdfExportWorkflow? pdfExportWorkflow;
+  final OcrService? ocrService;
+  final PdfDocumentOpener? pdfDocumentOpener;
   final DateTime Function() clock;
+  final ScreenOrientationController orientationController;
 
   @override
   State<PageManagementPage> createState() => _PageManagementPageState();
@@ -50,6 +60,7 @@ class _PageManagementPageState extends State<PageManagementPage> {
   @override
   void initState() {
     super.initState();
+    unawaited(widget.orientationController.enterContentScreen());
     DebugDiagnostics.instance.logState(
       'PageManagementPage.initState',
       mounted: mounted,
@@ -188,7 +199,11 @@ class _PageManagementPageState extends State<PageManagementPage> {
           sessionManager: widget.sessionManager,
           selectedPages: selectedPages,
           pdfExportWorkflow: _pdfExportWorkflow,
+          ocrService: widget.ocrService ?? const AndroidLocalOcrService(),
+          pdfDocumentOpener:
+              widget.pdfDocumentOpener ?? const AndroidPdfDocumentOpener(),
           clock: widget.clock,
+          orientationController: widget.orientationController,
         ),
       ),
     );
@@ -208,6 +223,7 @@ class _PageManagementPageState extends State<PageManagementPage> {
           sessionManager: widget.sessionManager,
           cameraStartup: widget.cameraStartup,
           initialPageIndex: pages.indexOf(page).clamp(0, pages.length - 1),
+          orientationController: widget.orientationController,
         ),
       ),
     );

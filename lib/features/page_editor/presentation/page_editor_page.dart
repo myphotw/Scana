@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -8,6 +9,7 @@ import 'package:scana/models/document_detection_result.dart';
 import 'package:scana/models/page_correction.dart';
 import 'package:scana/models/scan_page.dart';
 import 'package:scana/models/page_enhancement.dart';
+import 'package:scana/services/orientation/screen_orientation_controller.dart';
 
 /// Lets a user arrange and annotate raw scan pages before later processing.
 class PageEditorPage extends StatefulWidget {
@@ -16,11 +18,13 @@ class PageEditorPage extends StatefulWidget {
     required this.sessionManager,
     this.initialPageIndex,
     this.showPageList = true,
+    this.orientationController = const SystemScreenOrientationController(),
   });
 
   final ScanSessionManager sessionManager;
   final int? initialPageIndex;
   final bool showPageList;
+  final ScreenOrientationController orientationController;
 
   @override
   State<PageEditorPage> createState() => _PageEditorPageState();
@@ -32,6 +36,7 @@ class _PageEditorPageState extends State<PageEditorPage> {
   @override
   void initState() {
     super.initState();
+    unawaited(widget.orientationController.enterContentScreen());
     _selectedPageIndex = widget.initialPageIndex;
   }
 

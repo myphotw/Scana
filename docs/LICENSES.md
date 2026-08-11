@@ -14,6 +14,7 @@
 | pdf 3.13.0 | 기기 내부 PDF 문서·이미지 페이지 생성 | Apache License 2.0 |
 | uuid 4.6.0 | ScanSession ID 생성 | MIT |
 | OpenCV Android AAR 4.13.0 (`org.opencv:opencv`) | 오프라인 문서 검출, 원근 변환, 곡면 remap, Scan Color·Grayscale·Black & White 화질 보정 | Apache License 2.0 |
+| Google ML Kit Text Recognition Korean 16.0.1 (`com.google.mlkit:text-recognition-korean`) | bundled 기기 내 한국어 OCR·PDF 제목 제안 | Google ML Kit Terms / Google APIs Terms (비 오픈소스 SDK) |
 
 ## 도입 규칙
 
@@ -31,7 +32,14 @@ OpenCV 4.13.0은 OpenCV Team이 Maven Central에 배포하는 공식 Android AAR
 - 공식 라이선스: https://pub.dev/packages/pdf/license
 - 공식 저장소: https://github.com/DavBfr/dart_pdf
 
-OCR 라이브러리는 아직 추가하지 않았다.
+Google ML Kit Text Recognition v2 Korean 16.0.1은 Android 앱에 모델을 정적으로 포함하는 bundled artifact를 사용한다. 공식 문서의 bundled/unbundled 분류에 따라 앱 실행 중 모델 다운로드가 필요 없고 즉시 사용 가능하며, 한국어 script를 지원한다. 모델/인식은 기기 내에서 실행하고 Scana는 인식 이미지나 텍스트를 외부 API로 전송하지 않는다.
+
+이 artifact는 Apache/MIT 오픈소스가 아니며 Google ML Kit Terms와 Google APIs Terms의 적용을 받는 proprietary SDK이다. 유료 클라우드 OCR API는 사용하지 않는다. 배포 전에는 해당 약관과 Google Play/Data Safety 고지 요구를 재확인한다. 공식 Android 가이드의 용량 안내는 bundled script당 architecture별 약 4MB 증가이며, 실제 APK 크기는 빌드 결과로 별도 검증한다.
+
+- 공식 Android Text Recognition v2: https://developers.google.com/ml-kit/vision/text-recognition/v2/android
+- 공식 언어 지원: https://developers.google.com/ml-kit/vision/text-recognition/v2/languages
+- Google ML Kit Terms: https://developers.google.com/ml-kit/terms
+- Google APIs Terms: https://developers.google.com/terms
 
 M6에서는 새 외부 라이브러리를 추가하지 않고 M5에서 도입한 OpenCV 4.13.0을 재사용한다.
 

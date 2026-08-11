@@ -46,4 +46,6 @@ flutter {
 
 dependencies {
     implementation("org.opencv:opencv:4.13.0")
+    // Bundled Korean model: available on first run without a network download.
+    implementation("com.google.mlkit:text-recognition-korean:16.0.1")
 }

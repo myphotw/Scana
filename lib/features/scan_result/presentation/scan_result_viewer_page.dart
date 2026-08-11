@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -10,6 +11,7 @@ import 'package:scana/features/scan_session/application/scan_session_manager.dar
 import 'package:scana/models/scan_page.dart';
 import 'package:scana/services/camera/camera_session.dart';
 import 'package:scana/services/diagnostics/debug_diagnostics.dart';
+import 'package:scana/services/orientation/screen_orientation_controller.dart';
 
 /// Default scan-result experience. Raw images are only shown in the editor.
 class ScanResultViewerPage extends StatefulWidget {
@@ -18,11 +20,13 @@ class ScanResultViewerPage extends StatefulWidget {
     required this.sessionManager,
     this.cameraStartup,
     this.initialPageIndex = 0,
+    this.orientationController = const SystemScreenOrientationController(),
   });
 
   final ScanSessionManager sessionManager;
   final CameraStartup? cameraStartup;
   final int initialPageIndex;
+  final ScreenOrientationController orientationController;
 
   @override
   State<ScanResultViewerPage> createState() => _ScanResultViewerPageState();
@@ -36,6 +40,7 @@ class _ScanResultViewerPageState extends State<ScanResultViewerPage> {
   @override
   void initState() {
     super.initState();
+    unawaited(widget.orientationController.enterContentScreen());
     final count = widget.sessionManager.pageCount;
     _pageIndex = count == 0 ? 0 : widget.initialPageIndex.clamp(0, count - 1);
     _pageController = PageController(initialPage: _pageIndex);
@@ -143,6 +148,7 @@ class _ScanResultViewerPageState extends State<ScanResultViewerPage> {
         builder: (context) => PageManagementPage(
           sessionManager: widget.sessionManager,
           cameraStartup: widget.cameraStartup,
+          orientationController: widget.orientationController,
         ),
       ),
     );
@@ -162,9 +168,12 @@ class _ScanResultViewerPageState extends State<ScanResultViewerPage> {
           sessionManager: widget.sessionManager,
           cameraStartup: widget.cameraStartup,
           replacementPageIndex: index,
+          orientationController: widget.orientationController,
         ),
       ),
     );
+    await widget.orientationController.enterContentScreen();
+    if (!mounted) return;
     if (mounted && replaced == true) {
       setState(() => _pageIndex = index);
       _pageController.jumpToPage(index);
@@ -178,6 +187,7 @@ class _ScanResultViewerPageState extends State<ScanResultViewerPage> {
           sessionManager: widget.sessionManager,
           initialPageIndex: index,
           showPageList: false,
+          orientationController: widget.orientationController,
         ),
       ),
     );

@@ -11,11 +11,15 @@ class ScanSession {
     required this.id,
     required this.createdTime,
     this.captureMode = ScanCaptureMode.single,
+    this.suggestedTitle,
+    this.ocrSourcePageNo,
   });
 
   final String id;
   final DateTime createdTime;
   ScanCaptureMode captureMode;
+  String? suggestedTitle;
+  int? ocrSourcePageNo;
   final List<ScanPage> _pages = [];
 
   List<ScanPage> get pages => List.unmodifiable(_pages);
@@ -90,6 +94,11 @@ class ScanSession {
       status: status,
       enhancedImagePath: enhancedImagePath,
     );
+  }
+
+  void updateSuggestedTitle(String title, int sourcePageNo) {
+    suggestedTitle = title;
+    ocrSourcePageNo = sourcePageNo;
   }
 
   void _renumberPages() {

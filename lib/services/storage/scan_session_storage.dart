@@ -103,6 +103,10 @@ class AppPrivateSessionStorage
       'id': session.id,
       'createdTime': session.createdTime.toIso8601String(),
       'captureMode': session.captureMode.name,
+      if (session.suggestedTitle != null)
+        'suggestedTitle': session.suggestedTitle!,
+      if (session.ocrSourcePageNo != null)
+        'ocrSourcePageNo': session.ocrSourcePageNo!,
       'pages': session.pages
           .map(
             (page) => <String, Object>{
@@ -191,11 +195,19 @@ class AppPrivateSessionStorage
         (mode) => mode.name == metadata['captureMode'],
         orElse: () => ScanCaptureMode.single,
       );
+      final suggestedTitle = metadata['suggestedTitle'] as String?;
+      final ocrSourcePageNo = metadata['ocrSourcePageNo'] as int?;
+      if ((suggestedTitle != null && suggestedTitle.trim().isEmpty) ||
+          (ocrSourcePageNo != null && ocrSourcePageNo <= 0)) {
+        return null;
+      }
 
       final session = ScanSession(
         id: metadata['id'] as String,
         createdTime: createdTime,
         captureMode: captureMode,
+        suggestedTitle: suggestedTitle,
+        ocrSourcePageNo: ocrSourcePageNo,
       );
       for (final pageData in metadata['pages'] as List<dynamic>) {
         if (pageData is! Map<String, dynamic>) {
