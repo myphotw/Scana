@@ -15,6 +15,7 @@ import 'package:scana/models/scan_page.dart';
 import 'package:scana/models/scan_session.dart';
 import 'package:scana/models/page_correction.dart';
 import 'package:scana/models/scan_capture_mode.dart';
+import 'package:scana/models/page_enhancement.dart';
 import 'package:scana/services/storage/scan_session_storage.dart';
 
 void main() {
@@ -511,7 +512,9 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('shows and resumes a recovered session', (tester) async {
+  testWidgets('recovery resume opens gallery and Back returns to camera', (
+    tester,
+  ) async {
     final session = ScanSession(
       id: 'recovered-session',
       createdTime: DateTime.utc(2026, 8, 10, 1, 2),
@@ -538,6 +541,81 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(manager.currentSession?.id, 'recovered-session');
+    expect(find.byKey(const Key('pdfSelectionGallery')), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Back'));
+    await tester.pumpAndSettle();
+    expect(manager.currentSession?.id, 'recovered-session');
+    expect(find.text('카메라를 준비하는 중입니다.'), findsOneWidget);
+  });
+
+  testWidgets('recovery deletion returns to a new camera state', (
+    tester,
+  ) async {
+    final session =
+        ScanSession(
+          id: 'delete-recovered-session',
+          createdTime: DateTime.utc(2026, 8, 10),
+        )..addPage(
+          ScanPage(
+            pageNo: 1,
+            rawImagePath: '/scan_sessions/raw_001.jpg',
+            createdTime: DateTime.utc(2026, 8, 10),
+          ),
+        );
+    final manager = ScanSessionManager(storage: _TestSessionStorage());
+    addTearDown(manager.close);
+
+    await tester.pumpWidget(
+      ScanaApp(sessionManager: manager, recoverySession: session),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('삭제 후 새 스캔'));
+    await tester.pumpAndSettle();
+
+    expect(manager.currentSession, isNull);
+    expect(find.byKey(const Key('pdfSelectionGallery')), findsNothing);
+    expect(find.text('카메라를 준비하는 중입니다.'), findsOneWidget);
+  });
+
+  testWidgets('Viewer and Gallery prefer the completed enhanced image', (
+    tester,
+  ) async {
+    final manager = ScanSessionManager(storage: _TestSessionStorage());
+    addTearDown(manager.close);
+    final session =
+        ScanSession(
+          id: 'enhanced-viewer-session',
+          createdTime: DateTime.utc(2026, 8, 10),
+        )..addPage(
+          ScanPage(
+            pageNo: 1,
+            rawImagePath: '/raw.jpg',
+            correctedImagePath: '/corrected.jpg',
+            enhancedImagePath: '/enhanced.jpg',
+            enhancementStatus: EnhancementStatus.completed,
+            createdTime: DateTime.utc(2026, 8, 10),
+          ),
+        );
+    manager.restoreSession(session);
+
+    await tester.pumpWidget(
+      MaterialApp(home: ScanResultViewerPage(sessionManager: manager)),
+    );
+    await tester.pump();
+    var image = tester.widget<Image>(find.byType(Image).first);
+    expect((image.image as FileImage).file.path, '/enhanced.jpg');
+
+    await tester.pumpWidget(
+      MaterialApp(home: PageManagementPage(sessionManager: manager)),
+    );
+    await tester.pump();
+    image = tester.widget<Image>(find.byType(Image).first);
+    expect((image.image as FileImage).file.path, '/enhanced.jpg');
+    expect(
+      find.byKey(const ValueKey('page-processing-/raw.jpg')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('corner preview does not overlap the action toolbar', (
@@ -678,6 +756,21 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('page-enhancement-mode-selector')),
+        findsOneWidget,
+      );
+      await tester.tap(find.text(EnhancementMode.originalColor.label));
+      await tester.pumpAndSettle();
+      expect(
+        manager.currentSession!.pages.single.enhancementMode,
+        EnhancementMode.originalColor,
+      );
+      expect(
+        manager.currentSession!.pages.single.enhancementStatus,
+        EnhancementStatus.completed,
+      );
 
       expect(find.text('모서리 수정'), findsOneWidget);
       await tester.tap(find.text('모서리 수정'));

@@ -28,12 +28,20 @@ OpenCV 원근 변환, 경계/inset 기반의 보수적 곡면 평탄화, Guide C
 
 corrected 우선 반응형 선택 Gallery와 별도 PDF Page Review, Long Press Drag 최종 순서, 오프라인 PDF 생성, rotation 적용, 파일명 확인, Android SAF 저장 위치 선택·최근 위치 기억, 진행 상태와 성공 후 Session 정리를 구현한다.
 
+## M8 — Scan Image Enhancement & Recovery UX
+
+Recovery의 기본 진입점을 PDF Selection Gallery로 변경하고, OpenCV 기반 Scan Color·Original Color·Grayscale·Black & White 화질 보정, raw/corrected/enhanced 단계별 영속화, Gallery/Viewer/PDF 결과 일치와 실패 fallback을 구현한다.
+
+## M8.1 — Paper-aware Scan Color
+
+종이 background 추정, 저주파 조명·그림자 normalization, soft whitening과 bleed-through 억제, foreground/text 대비 및 edge 제한 sharpening, 컬러 콘텐츠 보호를 적용해 일반 사진 보정이 아닌 문서 스캔 특성으로 개선한다.
+
 ### Phase 5 고급 기능 (예정)
 
 - 문서 중심 Auto Capture
 - 자동 연속 스캔
 - Camera Preview 실시간 문서 검출
 
-## Phase 7 — 화질 보정과 OCR
+## Phase 7 — OCR
 
-문서 화질 보정과 OCR 제목 추천을 구현한다.
+OCR 제목 추천을 구현한다.

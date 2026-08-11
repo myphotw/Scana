@@ -10,7 +10,9 @@ import 'package:scana/models/page_correction.dart';
 import 'package:scana/models/page_boundary.dart';
 import 'package:scana/models/scan_page.dart';
 import 'package:scana/models/scan_capture_mode.dart';
+import 'package:scana/models/page_enhancement.dart';
 import 'package:scana/services/image_processing/document_detector.dart';
+import 'package:scana/services/image_processing/page_enhancer.dart';
 import 'package:scana/services/image_processing/page_corrector.dart';
 import 'package:scana/services/image_processing/spread_capture_splitter.dart';
 import 'package:scana/services/storage/scan_session_storage.dart';
@@ -677,6 +679,7 @@ void main() {
         ),
         documentDetector: const _SuccessfulDocumentDetector(),
         pageCorrector: const _SuccessfulPageCorrector(),
+        pageEnhancer: const _SuccessfulPageEnhancer(),
         sessionIdGenerator: () => 'delete-correction-session',
       );
       final capture = await _createCapture(testRoot, 'delete-correction.jpg');
@@ -688,18 +691,28 @@ void main() {
       await manager.correctPageAt(0, CorrectionType.curved);
       final curvedPath =
           manager.currentSession!.pages.single.correctedImagePath!;
+      await manager.enhancePageAt(0, EnhancementMode.grayscale);
+      final enhancedPath =
+          manager.currentSession!.pages.single.enhancedImagePath!;
       final pendingPath = path.join(
         path.dirname(rawPath),
         '.corrected_001.jpg.pending.jpg',
       );
+      final enhancementPendingPath = path.join(
+        path.dirname(rawPath),
+        '.enhanced_bw_001.jpg.pending.jpg',
+      );
       await File(pendingPath).writeAsBytes([9]);
+      await File(enhancementPendingPath).writeAsBytes([9]);
 
       await manager.deletePageAt(0);
 
       expect(await File(rawPath).exists(), isFalse);
       expect(await File(perspectivePath).exists(), isFalse);
       expect(await File(curvedPath).exists(), isFalse);
+      expect(await File(enhancedPath).exists(), isFalse);
       expect(await File(pendingPath).exists(), isFalse);
+      expect(await File(enhancementPendingPath).exists(), isFalse);
       expect(manager.pageCount, 0);
     },
   );
@@ -963,6 +976,144 @@ void main() {
     expect(recoveryManager.captureMode, ScanCaptureMode.spread);
     expect(recovered.pages, hasLength(2));
   });
+
+  test('default enhancement mode is scan color', () {
+    final page = ScanPage(
+      pageNo: 1,
+      rawImagePath: '/raw.jpg',
+      createdTime: DateTime.utc(2026, 8, 10),
+    );
+
+    expect(page.enhancementMode, EnhancementMode.scanColor);
+    expect(page.enhancementStatus, EnhancementStatus.none);
+    expect(page.displayImagePath, '/raw.jpg');
+  });
+
+  test('automatic scan color enhancement persists and recovers', () async {
+    manager.close();
+    manager = ScanSessionManager(
+      storage: AppPrivateSessionStorage(
+        appPrivateDirectoryProvider: () async => testRoot,
+      ),
+      documentDetector: const _SuccessfulDocumentDetector(),
+      pageCorrector: const _SuccessfulPageCorrector(),
+      pageEnhancer: const _SuccessfulPageEnhancer(),
+      sessionIdGenerator: () => 'enhancement-session',
+    );
+
+    final page = await manager.captureAndProcess(
+      (await _createCapture(testRoot, 'enhance.jpg')).path,
+    );
+
+    expect(page.correctionStatus, CorrectionStatus.completed);
+    expect(page.enhancementMode, EnhancementMode.scanColor);
+    expect(page.enhancementStatus, EnhancementStatus.completed);
+    expect(path.basename(page.enhancedImagePath!), 'enhanced_001.jpg');
+    expect(page.displayImagePath, page.enhancedImagePath);
+    expect(await File(page.rawImagePath).exists(), isTrue);
+    expect(await File(page.correctedImagePath!).exists(), isTrue);
+    expect(await File(page.enhancedImagePath!).exists(), isTrue);
+
+    final metadata =
+        jsonDecode(
+              await File(
+                path.join(
+                  testRoot.path,
+                  'scan_sessions',
+                  'enhancement-session',
+                  'session.json',
+                ),
+              ).readAsString(),
+            )
+            as Map<String, dynamic>;
+    final pageMetadata = (metadata['pages'] as List).single as Map;
+    expect(pageMetadata['enhancedImageFile'], 'enhanced_001.jpg');
+    expect(path.isAbsolute(pageMetadata['enhancedImageFile'] as String), false);
+    expect(pageMetadata['enhancementMode'], 'scanColor');
+    expect(pageMetadata['enhancementStatus'], 'completed');
+
+    manager.close();
+    manager = ScanSessionManager(
+      storage: AppPrivateSessionStorage(
+        appPrivateDirectoryProvider: () async => testRoot,
+      ),
+    );
+    final recovered =
+        (await manager.findRecoverableSessions()).single.pages.single;
+    expect(recovered.enhancedImagePath, page.enhancedImagePath);
+    expect(recovered.enhancementMode, EnhancementMode.scanColor);
+    expect(recovered.enhancementStatus, EnhancementStatus.completed);
+  });
+
+  test('enhancement mode changes use corrected input and persist', () async {
+    manager.close();
+    final enhancer = _SuccessfulPageEnhancer();
+    manager = ScanSessionManager(
+      storage: AppPrivateSessionStorage(
+        appPrivateDirectoryProvider: () async => testRoot,
+      ),
+      documentDetector: const _SuccessfulDocumentDetector(),
+      pageCorrector: const _SuccessfulPageCorrector(),
+      pageEnhancer: enhancer,
+      sessionIdGenerator: () => 'enhancement-modes',
+    );
+    await manager.captureAndProcess(
+      (await _createCapture(testRoot, 'modes.jpg')).path,
+    );
+    final correctedPath =
+        manager.currentSession!.pages.single.correctedImagePath!;
+
+    expect(
+      await manager.enhancePageAt(0, EnhancementMode.originalColor),
+      isTrue,
+    );
+    expect(
+      manager.currentSession!.pages.single.displayImagePath,
+      correctedPath,
+    );
+    expect(await manager.enhancePageAt(0, EnhancementMode.grayscale), isTrue);
+    expect(enhancer.lastSourceImagePath, correctedPath);
+    expect(
+      path.basename(manager.currentSession!.pages.single.enhancedImagePath!),
+      startsWith('enhanced_grayscale_001'),
+    );
+    expect(await manager.enhancePageAt(0, EnhancementMode.blackWhite), isTrue);
+
+    manager.close();
+    manager = ScanSessionManager(
+      storage: AppPrivateSessionStorage(
+        appPrivateDirectoryProvider: () async => testRoot,
+      ),
+    );
+    final recovered =
+        (await manager.findRecoverableSessions()).single.pages.single;
+    expect(recovered.enhancementMode, EnhancementMode.blackWhite);
+    expect(recovered.enhancementStatus, EnhancementStatus.completed);
+    expect(recovered.displayImagePath, recovered.enhancedImagePath);
+  });
+
+  test('enhancement failure preserves corrected fallback and page', () async {
+    manager.close();
+    manager = ScanSessionManager(
+      storage: AppPrivateSessionStorage(
+        appPrivateDirectoryProvider: () async => testRoot,
+      ),
+      documentDetector: const _SuccessfulDocumentDetector(),
+      pageCorrector: const _SuccessfulPageCorrector(),
+      pageEnhancer: const _FailingPageEnhancer(),
+      sessionIdGenerator: () => 'enhancement-failure',
+    );
+
+    final page = await manager.captureAndProcess(
+      (await _createCapture(testRoot, 'failure.jpg')).path,
+    );
+
+    expect(page.enhancementStatus, EnhancementStatus.failed);
+    expect(page.correctionStatus, CorrectionStatus.completed);
+    expect(page.displayImagePath, page.correctedImagePath);
+    expect(await File(page.rawImagePath).exists(), isTrue);
+    expect(await File(page.correctedImagePath!).exists(), isTrue);
+  });
 }
 
 ScanSessionManager _spreadManager(
@@ -975,6 +1126,7 @@ ScanSessionManager _spreadManager(
   ),
   documentDetector: detector,
   pageCorrector: const _SuccessfulPageCorrector(),
+  pageEnhancer: const _SuccessfulPageEnhancer(),
   spreadCaptureSplitter: const _TestSpreadCaptureSplitter(),
   spreadFallbackCropper: fallbackCropper,
   sessionIdGenerator: () => 'session-uuid',
@@ -1201,6 +1353,42 @@ class _SuccessfulPageCorrector implements PageCorrector {
   }) async {
     await File(outputImagePath).writeAsBytes([4, 5, 6]);
     return const PageCorrectionResult(outputWidth: 900, outputHeight: 1400);
+  }
+}
+
+class _SuccessfulPageEnhancer implements PageEnhancer {
+  const _SuccessfulPageEnhancer();
+
+  static String? lastSource;
+
+  String? get lastSourceImagePath => lastSource;
+
+  @override
+  Future<PageEnhancementResult> enhance({
+    required String sourceImagePath,
+    required String outputImagePath,
+    required EnhancementMode mode,
+  }) async {
+    lastSource = sourceImagePath;
+    await File(outputImagePath).writeAsBytes([10, 11, 12]);
+    return const PageEnhancementResult(
+      outputWidth: 900,
+      outputHeight: 1400,
+      processingMilliseconds: 4,
+    );
+  }
+}
+
+class _FailingPageEnhancer implements PageEnhancer {
+  const _FailingPageEnhancer();
+
+  @override
+  Future<PageEnhancementResult> enhance({
+    required String sourceImagePath,
+    required String outputImagePath,
+    required EnhancementMode mode,
+  }) {
+    throw StateError('Enhancement failed.');
   }
 }
 

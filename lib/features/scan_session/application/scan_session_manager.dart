@@ -10,7 +10,9 @@ import 'package:scana/models/document_detection_result.dart';
 import 'package:scana/models/page_correction.dart';
 import 'package:scana/models/page_boundary.dart';
 import 'package:scana/models/scan_capture_mode.dart';
+import 'package:scana/models/page_enhancement.dart';
 import 'package:scana/services/image_processing/document_detector.dart';
+import 'package:scana/services/image_processing/page_enhancer.dart';
 import 'package:scana/services/image_processing/page_corrector.dart';
 import 'package:scana/services/image_processing/spread_capture_splitter.dart';
 import 'package:scana/services/storage/scan_session_storage.dart';
@@ -32,6 +34,7 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
     required ScanSessionStorage storage,
     DocumentDetector documentDetector = const NoOpDocumentDetector(),
     PageCorrector pageCorrector = const UnavailablePageCorrector(),
+    PageEnhancer pageEnhancer = const UnavailablePageEnhancer(),
     SpreadCaptureSplitter spreadCaptureSplitter =
         const OpenCvSpreadCaptureSplitter(),
     SpreadFallbackCropper spreadFallbackCropper =
@@ -43,6 +46,7 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
       storage: storage,
       documentDetector: documentDetector,
       pageCorrector: pageCorrector,
+      pageEnhancer: pageEnhancer,
       spreadCaptureSplitter: spreadCaptureSplitter,
       spreadFallbackCropper: spreadFallbackCropper,
       sessionIdGenerator: sessionIdGenerator,
@@ -54,6 +58,7 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
     required this._storage,
     required this._documentDetector,
     required this._pageCorrector,
+    required this._pageEnhancer,
     required this._spreadCaptureSplitter,
     required this._spreadFallbackCropper,
     required this._sessionIdGenerator,
@@ -65,6 +70,7 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
   final ScanSessionStorage _storage;
   final DocumentDetector _documentDetector;
   final PageCorrector _pageCorrector;
+  final PageEnhancer _pageEnhancer;
   final SpreadCaptureSplitter _spreadCaptureSplitter;
   final SpreadFallbackCropper _spreadFallbackCropper;
   final SessionIdGenerator _sessionIdGenerator;
@@ -211,6 +217,8 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
     DocumentCorners? stablePreviewCorners,
     PageBoundary? stablePreviewBoundary,
   }) async {
+    final totalStopwatch = Stopwatch()..start();
+    final detectionStopwatch = Stopwatch()..start();
     final page = await addRawCapture(
       capturedImagePath,
       captureGuideRegion: captureGuideRegion,
@@ -218,11 +226,34 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
       stablePreviewBoundary: stablePreviewBoundary,
       pageSide: pageSide,
     );
+    detectionStopwatch.stop();
+    DebugDiagnostics.instance.log(
+      'IMAGE_PROCESSING',
+      'Detection: ${detectionStopwatch.elapsedMilliseconds} ms',
+    );
     final session = _requireSession();
     final index = session.pages.indexOf(page);
     if (index >= 0 && page.documentCorners != null) {
-      await correctPageAt(index, CorrectionType.perspective);
+      final perspectiveStopwatch = Stopwatch()..start();
+      final corrected = await correctPageAt(
+        index,
+        CorrectionType.perspective,
+        enhanceAfterCorrection: false,
+      );
+      perspectiveStopwatch.stop();
+      DebugDiagnostics.instance.log(
+        'IMAGE_PROCESSING',
+        'Perspective: ${perspectiveStopwatch.elapsedMilliseconds} ms',
+      );
+      if (corrected) {
+        await enhancePageAt(index, EnhancementMode.scanColor);
+      }
     }
+    totalStopwatch.stop();
+    DebugDiagnostics.instance.log(
+      'IMAGE_PROCESSING',
+      'Total: ${totalStopwatch.elapsedMilliseconds} ms',
+    );
     return session.pages[index >= 0 ? index : session.pages.length - 1];
   }
 
@@ -270,10 +301,24 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
 
     final detectedPage = session.pages[index];
     if (SpreadPageDetectionPolicy.isStableDetection(detectedPage)) {
-      final corrected = await correctPageAt(index, CorrectionType.perspective);
-      if (corrected) return session.pages[index];
+      final corrected = await correctPageAt(
+        index,
+        CorrectionType.perspective,
+        enhanceAfterCorrection: false,
+      );
+      if (corrected) {
+        await enhancePageAt(index, EnhancementMode.scanColor);
+        return session.pages[index];
+      }
     }
-    await _createSpreadFallback(session, index, pageSide);
+    final fallbackCreated = await _createSpreadFallback(
+      session,
+      index,
+      pageSide,
+    );
+    if (fallbackCreated) {
+      await enhancePageAt(index, EnhancementMode.scanColor);
+    }
     return session.pages[index];
   }
 
@@ -391,7 +436,12 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
         return false;
       }
 
-      session.replacePageAt(index, corrected);
+      final enhanced = await _createEnhancedResult(
+        session,
+        corrected,
+        EnhancementMode.scanColor,
+      );
+      session.replacePageAt(index, enhanced);
       await _storage.saveSession(session);
       await _storage.deletePageFiles(previousPage);
       notifyListeners();
@@ -450,7 +500,11 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
     return _detectPage(_requireSession(), index);
   }
 
-  Future<bool> correctPageAt(int index, CorrectionType type) async {
+  Future<bool> correctPageAt(
+    int index,
+    CorrectionType type, {
+    bool enhanceAfterCorrection = true,
+  }) async {
     _ensureOpen();
     final session = _requireSession();
     final page = session.pages[index];
@@ -537,6 +591,16 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
       );
       await _storage.saveSession(session);
       notifyListeners();
+      if (enhanceAfterCorrection) {
+        try {
+          await enhancePageAt(index, session.pages[index].enhancementMode);
+        } on Object catch (error) {
+          DebugDiagnostics.instance.log(
+            'IMAGE_PROCESSING',
+            'Enhancement state update failed after correction: $error',
+          );
+        }
+      }
       return true;
     } on Object catch (error) {
       if (outputTarget != null) {
@@ -565,6 +629,25 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
       notifyListeners();
       return false;
     }
+  }
+
+  Future<bool> enhancePageAt(int index, EnhancementMode mode) async {
+    _ensureOpen();
+    final session = _requireSession();
+    final page = session.pages[index];
+    session.updateEnhancementAt(
+      index,
+      mode: mode,
+      status: EnhancementStatus.processing,
+    );
+    await _storage.saveSession(session);
+    notifyListeners();
+
+    final enhanced = await _createEnhancedResult(session, page, mode);
+    session.replacePageAt(index, enhanced);
+    await _storage.saveSession(session);
+    notifyListeners();
+    return enhanced.enhancementStatus == EnhancementStatus.completed;
   }
 
   @override
@@ -722,6 +805,74 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
         }
       }
       return null;
+    }
+  }
+
+  Future<ScanPage> _createEnhancedResult(
+    ScanSession session,
+    ScanPage page,
+    EnhancementMode mode,
+  ) async {
+    if (mode == EnhancementMode.originalColor) {
+      return page.withEnhancement(
+        mode: mode,
+        status: EnhancementStatus.completed,
+      );
+    }
+    final sourceImagePath = page.correctedImagePath;
+    final enhancementStorage = _storage;
+    if (sourceImagePath == null) {
+      return page.withEnhancement(mode: mode, status: EnhancementStatus.failed);
+    }
+    if (enhancementStorage is! EnhancementSessionStorage) {
+      return page.withEnhancement(mode: mode, status: EnhancementStatus.failed);
+    }
+    final enhancementOutputStorage =
+        enhancementStorage as EnhancementSessionStorage;
+
+    EnhancementOutputTarget? outputTarget;
+    final stopwatch = Stopwatch()..start();
+    try {
+      final preparedTarget = await enhancementOutputStorage
+          .prepareEnhancementOutput(
+            sessionId: session.id,
+            rawImagePath: page.rawImagePath,
+            mode: mode,
+          );
+      outputTarget = preparedTarget;
+      final result = await _pageEnhancer.enhance(
+        sourceImagePath: sourceImagePath,
+        outputImagePath: preparedTarget.workingPath,
+        mode: mode,
+      );
+      final enhancedImagePath = await enhancementOutputStorage
+          .commitEnhancementOutput(preparedTarget);
+      stopwatch.stop();
+      DebugDiagnostics.instance.log(
+        'IMAGE_PROCESSING',
+        'Scan Enhancement: ${stopwatch.elapsedMilliseconds} ms '
+            'native=${result.processingMilliseconds} ms mode=${mode.name}',
+      );
+      return page.withEnhancement(
+        mode: mode,
+        status: EnhancementStatus.completed,
+        enhancedImagePath: enhancedImagePath,
+      );
+    } on Object catch (error) {
+      stopwatch.stop();
+      if (outputTarget != null) {
+        try {
+          await enhancementOutputStorage.discardEnhancementOutput(outputTarget);
+        } on Object {
+          // The corrected image remains the final fallback.
+        }
+      }
+      DebugDiagnostics.instance.log(
+        'IMAGE_PROCESSING',
+        'Scan Enhancement failed after ${stopwatch.elapsedMilliseconds} ms '
+            'mode=${mode.name} error=$error',
+      );
+      return page.withEnhancement(mode: mode, status: EnhancementStatus.failed);
     }
   }
 

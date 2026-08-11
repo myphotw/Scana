@@ -21,7 +21,10 @@
 | Navigation lifecycle | 수정 완료 | 파일명 Dialog State가 TextEditingController lifecycle을 직접 소유하도록 변경 |
 | M7.2.2 DEBUG 진단 | 구현 완료 | 영속 오류/stack·lifecycle·Navigator·SAF request/result 로그와 재시작 후 TXT 내보내기 |
 | M7.2.3 filename Dialog | 구현 완료 | premature controller dispose 제거, SAF 구조 유지, 반복 Dialog 회귀 테스트 추가 |
-| 화질 보정 | 미착수 | 향후 단계 |
+| M8 Session Recovery UX | 완료 | 이어하기 → PDF Selection Gallery, Back → 동일 Session Camera |
+| M8 화질 보정 | 완료 | Scan Color 기본 자동 처리, 원본·그레이·흑백 수동 전환, enhanced 영속화·fallback |
+| M8 처리 안정성 | 완료 | 단일 background executor, full-resolution 출력, 1200px 분석 map, 명시적 Mat release |
+| M8.1 Paper-aware Scan Color | 완료 | 종이 mask 기반 whitening·비침 억제, text-aware 대비, edge 제한 sharpening, 컬러 보호 |
 | OCR | 미착수 | 향후 단계 |
 | 외부 라이브러리 | 사용 중 | camera, path, path_provider, pdf, uuid, OpenCV |
 

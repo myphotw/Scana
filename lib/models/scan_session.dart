@@ -3,6 +3,7 @@ import 'package:scana/models/document_detection_result.dart';
 import 'package:scana/models/page_correction.dart';
 import 'package:scana/models/page_boundary.dart';
 import 'package:scana/models/scan_capture_mode.dart';
+import 'package:scana/models/page_enhancement.dart';
 
 /// Groups the raw pages that belong to one scanning operation.
 class ScanSession {
@@ -75,6 +76,19 @@ class ScanSession {
       type: type,
       correctedImagePath: correctedImagePath,
       outcome: outcome,
+    );
+  }
+
+  void updateEnhancementAt(
+    int index, {
+    required EnhancementMode mode,
+    required EnhancementStatus status,
+    String? enhancedImagePath,
+  }) {
+    _pages[index] = _pages[index].withEnhancement(
+      mode: mode,
+      status: status,
+      enhancedImagePath: enhancedImagePath,
     );
   }
 

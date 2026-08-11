@@ -237,7 +237,7 @@ class _ScanResultImage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final imagePath = page.correctedImagePath ?? page.rawImagePath;
+    final imagePath = page.displayImagePath;
     return ColoredBox(
       color: Colors.black,
       child: Center(

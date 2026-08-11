@@ -534,7 +534,7 @@ class _ReviewImage extends StatelessWidget {
     return Transform.rotate(
       angle: page.rotation * math.pi / 180,
       child: Image.file(
-        File(page.correctedImagePath ?? page.rawImagePath),
+        File(page.displayImagePath),
         fit: BoxFit.contain,
         errorBuilder: (context, error, stackTrace) =>
             const Center(child: Icon(Icons.image_not_supported_outlined)),

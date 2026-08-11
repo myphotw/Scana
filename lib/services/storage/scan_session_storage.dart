@@ -10,11 +10,22 @@ import 'package:scana/models/document_detection_result.dart';
 import 'package:scana/models/page_correction.dart';
 import 'package:scana/models/page_boundary.dart';
 import 'package:scana/models/scan_capture_mode.dart';
+import 'package:scana/models/page_enhancement.dart';
 
 typedef AppPrivateDirectoryProvider = Future<Directory> Function();
 
 class CorrectionOutputTarget {
   const CorrectionOutputTarget({
+    required this.workingPath,
+    required this.finalPath,
+  });
+
+  final String workingPath;
+  final String finalPath;
+}
+
+class EnhancementOutputTarget {
+  const EnhancementOutputTarget({
     required this.workingPath,
     required this.finalPath,
   });
@@ -52,8 +63,21 @@ abstract interface class ScanSessionStorage {
   Future<void> deletePageFiles(ScanPage page);
 }
 
+abstract interface class EnhancementSessionStorage {
+  Future<EnhancementOutputTarget> prepareEnhancementOutput({
+    required String sessionId,
+    required String rawImagePath,
+    required EnhancementMode mode,
+  });
+
+  Future<String> commitEnhancementOutput(EnhancementOutputTarget target);
+
+  Future<void> discardEnhancementOutput(EnhancementOutputTarget target);
+}
+
 /// Stores sessions in the app support directory, outside OS-managed caches.
-class AppPrivateSessionStorage implements ScanSessionStorage {
+class AppPrivateSessionStorage
+    implements ScanSessionStorage, EnhancementSessionStorage {
   factory AppPrivateSessionStorage({
     AppPrivateDirectoryProvider appPrivateDirectoryProvider =
         getApplicationSupportDirectory,
@@ -105,6 +129,10 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
               'correctionStatus': page.correctionStatus.name,
               'correctionType': page.correctionType.name,
               'correctionOutcome': page.correctionOutcome.name,
+              if (page.enhancedImagePath != null)
+                'enhancedImageFile': path.basename(page.enhancedImagePath!),
+              'enhancementMode': page.enhancementMode.name,
+              'enhancementStatus': page.enhancementStatus.name,
             },
           )
           .toList(),
@@ -203,6 +231,13 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
         var correctionStatus = _correctionStatusFromJson(
           pageData['correctionStatus'],
         );
+        final enhancedImageFile = pageData['enhancedImageFile'] as String?;
+        final enhancementMode = _enhancementModeFromJson(
+          pageData['enhancementMode'],
+        );
+        var enhancementStatus = _enhancementStatusFromJson(
+          pageData['enhancementStatus'],
+        );
         if (pageNo == null ||
             rawImageFile == null ||
             !_isRelativeFileName(rawImageFile) ||
@@ -212,7 +247,9 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
             (boundaryValue != null && pageBoundary == null) ||
             (guideCornersValue != null && captureGuideCorners == null) ||
             (correctedImageFile != null &&
-                !_isRelativeFileName(correctedImageFile))) {
+                !_isRelativeFileName(correctedImageFile)) ||
+            (enhancedImageFile != null &&
+                !_isRelativeFileName(enhancedImageFile))) {
           return null;
         }
 
@@ -244,6 +281,23 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
             correctionStatus == CorrectionStatus.completed) {
           correctionOutcome = CorrectionOutcome.completed;
         }
+        String? enhancedImagePath;
+        if (enhancedImageFile != null) {
+          final candidate = path.join(sessionDirectory.path, enhancedImageFile);
+          if (await File(candidate).exists()) {
+            enhancedImagePath = candidate;
+          } else if (enhancementStatus == EnhancementStatus.completed) {
+            enhancementStatus = EnhancementStatus.failed;
+          }
+        }
+        if (enhancementStatus == EnhancementStatus.processing) {
+          enhancementStatus = EnhancementStatus.failed;
+        }
+        if (enhancementStatus == EnhancementStatus.completed &&
+            enhancementMode != EnhancementMode.originalColor &&
+            enhancedImagePath == null) {
+          enhancementStatus = EnhancementStatus.failed;
+        }
         session.addPage(
           ScanPage(
             pageNo: pageNo,
@@ -262,6 +316,9 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
             correctionStatus: correctionStatus,
             correctionType: correctionType,
             correctionOutcome: correctionOutcome,
+            enhancedImagePath: enhancedImagePath,
+            enhancementMode: enhancementMode,
+            enhancementStatus: enhancementStatus,
           ),
         );
       }
@@ -400,6 +457,56 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
   }
 
   @override
+  Future<EnhancementOutputTarget> prepareEnhancementOutput({
+    required String sessionId,
+    required String rawImagePath,
+    required EnhancementMode mode,
+  }) async {
+    final directory = await _sessionDirectory(sessionId);
+    await directory.create(recursive: true);
+    final rawStem = path.basenameWithoutExtension(rawImagePath);
+    final suffix = rawStem.startsWith('raw_')
+        ? rawStem.substring('raw_'.length)
+        : rawStem;
+    final modeToken = switch (mode) {
+      EnhancementMode.scanColor => '',
+      EnhancementMode.originalColor => '_original',
+      EnhancementMode.grayscale => '_grayscale',
+      EnhancementMode.blackWhite => '_bw',
+    };
+    final baseName = 'enhanced${modeToken}_$suffix.jpg';
+    var finalName = baseName;
+    var revision = 2;
+    while (await File(path.join(directory.path, finalName)).exists()) {
+      finalName = '${path.basenameWithoutExtension(baseName)}_$revision.jpg';
+      revision++;
+    }
+    return EnhancementOutputTarget(
+      workingPath: path.join(directory.path, '.$finalName.pending.jpg'),
+      finalPath: path.join(directory.path, finalName),
+    );
+  }
+
+  @override
+  Future<String> commitEnhancementOutput(EnhancementOutputTarget target) async {
+    final workingFile = File(target.workingPath);
+    if (!await workingFile.exists()) {
+      throw const FileSystemException('Enhancement output was not created.');
+    }
+    await workingFile.copy(target.finalPath);
+    await workingFile.delete();
+    return target.finalPath;
+  }
+
+  @override
+  Future<void> discardEnhancementOutput(EnhancementOutputTarget target) async {
+    final workingFile = File(target.workingPath);
+    if (await workingFile.exists()) {
+      await workingFile.delete();
+    }
+  }
+
+  @override
   Future<void> deletePageFiles(ScanPage page) async {
     final rawStem = path.basenameWithoutExtension(page.rawImagePath);
     final suffix = rawStem.startsWith('raw_')
@@ -409,9 +516,15 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
     final filePaths = <String>{
       page.rawImagePath,
       if (page.correctedImagePath != null) page.correctedImagePath!,
+      if (page.enhancedImagePath != null) page.enhancedImagePath!,
     };
     final correctionFilePattern = RegExp(
       r'^\.?corrected(?:_curved)?_' +
+          RegExp.escape(suffix) +
+          r'(?:_\d+)?\.jpg(?:\.pending\.jpg)?$',
+    );
+    final enhancementFilePattern = RegExp(
+      r'^\.?enhanced(?:_(?:original|grayscale|bw))?_' +
           RegExp.escape(suffix) +
           r'(?:_\d+)?\.jpg(?:\.pending\.jpg)?$',
     );
@@ -419,7 +532,8 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
     if (await directory.exists()) {
       await for (final entity in directory.list(followLinks: false)) {
         if (entity is File &&
-            correctionFilePattern.hasMatch(path.basename(entity.path))) {
+            (correctionFilePattern.hasMatch(path.basename(entity.path)) ||
+                enhancementFilePattern.hasMatch(path.basename(entity.path)))) {
           filePaths.add(entity.path);
         }
       }
@@ -467,6 +581,20 @@ class AppPrivateSessionStorage implements ScanSessionStorage {
     return CorrectionOutcome.values.firstWhere(
       (outcome) => outcome.name == value,
       orElse: () => CorrectionOutcome.none,
+    );
+  }
+
+  static EnhancementMode _enhancementModeFromJson(Object? value) {
+    return EnhancementMode.values.firstWhere(
+      (mode) => mode.name == value,
+      orElse: () => EnhancementMode.scanColor,
+    );
+  }
+
+  static EnhancementStatus _enhancementStatusFromJson(Object? value) {
+    return EnhancementStatus.values.firstWhere(
+      (status) => status.name == value,
+      orElse: () => EnhancementStatus.none,
     );
   }
 }

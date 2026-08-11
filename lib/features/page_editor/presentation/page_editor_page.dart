@@ -7,6 +7,7 @@ import 'package:scana/features/scan_session/application/scan_session_manager.dar
 import 'package:scana/models/document_detection_result.dart';
 import 'package:scana/models/page_correction.dart';
 import 'package:scana/models/scan_page.dart';
+import 'package:scana/models/page_enhancement.dart';
 
 /// Lets a user arrange and annotate raw scan pages before later processing.
 class PageEditorPage extends StatefulWidget {
@@ -160,7 +161,9 @@ class _SelectedPageWorkbenchState extends State<_SelectedPageWorkbench> {
   @override
   Widget build(BuildContext context) {
     final page = widget.page;
-    final isProcessing = page.correctionStatus == CorrectionStatus.processing;
+    final isProcessing =
+        page.correctionStatus == CorrectionStatus.processing ||
+        page.enhancementStatus == EnhancementStatus.processing;
     return Column(
       children: [
         Padding(
@@ -179,7 +182,7 @@ class _SelectedPageWorkbenchState extends State<_SelectedPageWorkbench> {
         Expanded(
           child: _showCorrected && page.correctedImagePath != null
               ? _CorrectedPagePreview(
-                  imagePath: page.correctedImagePath!,
+                  imagePath: page.displayImagePath,
                   rotation: page.rotation,
                 )
               : _DocumentCornerEditor(
@@ -231,6 +234,27 @@ class _SelectedPageWorkbenchState extends State<_SelectedPageWorkbench> {
                 ],
               ),
               const SizedBox(height: 6),
+              SizedBox(
+                width: double.infinity,
+                child: SegmentedButton<EnhancementMode>(
+                  key: const ValueKey('page-enhancement-mode-selector'),
+                  showSelectedIcon: false,
+                  segments: EnhancementMode.values
+                      .map(
+                        (mode) =>
+                            ButtonSegment(value: mode, label: Text(mode.label)),
+                      )
+                      .toList(growable: false),
+                  selected: {page.enhancementMode},
+                  onSelectionChanged: isProcessing
+                      ? null
+                      : (selection) => widget.sessionManager.enhancePageAt(
+                          widget.pageIndex,
+                          selection.single,
+                        ),
+                ),
+              ),
+              const SizedBox(height: 6),
               Row(
                 children: [
                   Expanded(
@@ -261,11 +285,8 @@ class _SelectedPageWorkbenchState extends State<_SelectedPageWorkbench> {
               ),
               const SizedBox(height: 4),
               Text(
-                _correctionStatusLabel(
-                  page.correctionStatus,
-                  type: page.correctionType,
-                  outcome: page.correctionOutcome,
-                ),
+                '${_correctionStatusLabel(page.correctionStatus, type: page.correctionType, outcome: page.correctionOutcome)}'
+                ' · ${_enhancementStatusLabel(page.enhancementStatus, page.enhancementMode)}',
                 style: Theme.of(context).textTheme.bodySmall,
                 textAlign: TextAlign.center,
               ),
@@ -537,7 +558,8 @@ class _PageEditorTile extends StatelessWidget {
       subtitle: Text(
         '회전 ${page.rotation}° · '
         '${_correctionTypeLabel(page.correctionType)} · '
-        '${_correctionStatusLabel(page.correctionStatus, outcome: page.correctionOutcome)}',
+        '${_correctionStatusLabel(page.correctionStatus, outcome: page.correctionOutcome)} · '
+        '${_enhancementStatusLabel(page.enhancementStatus, page.enhancementMode)}',
       ),
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
@@ -606,7 +628,7 @@ class _PageThumbnail extends StatelessWidget {
           child: Transform.rotate(
             angle: page.rotation * math.pi / 180,
             child: Image.file(
-              File(page.rawImagePath),
+              File(page.displayImagePath),
               fit: BoxFit.cover,
               errorBuilder: (context, error, stackTrace) {
                 return const Icon(Icons.image_not_supported_outlined);
@@ -617,4 +639,13 @@ class _PageThumbnail extends StatelessWidget {
       ),
     );
   }
+}
+
+String _enhancementStatusLabel(EnhancementStatus status, EnhancementMode mode) {
+  return switch (status) {
+    EnhancementStatus.none => '검출/스캔 처리 전',
+    EnhancementStatus.processing => '${mode.label} 처리 중',
+    EnhancementStatus.completed => '${mode.label} 완료',
+    EnhancementStatus.failed => '스캔 처리 실패 · 보정본 사용',
+  };
 }

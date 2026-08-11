@@ -5,6 +5,7 @@ import 'package:scana/features/scan_session/application/scan_session_manager.dar
 import 'package:scana/services/camera/camera_session.dart';
 import 'package:scana/services/image_processing/document_detector.dart';
 import 'package:scana/services/image_processing/page_corrector.dart';
+import 'package:scana/services/image_processing/page_enhancer.dart';
 import 'package:scana/services/diagnostics/debug_diagnostics.dart';
 import 'package:scana/services/storage/scan_session_storage.dart';
 
@@ -16,6 +17,7 @@ Future<void> main() async {
     storage: AppPrivateSessionStorage(),
     documentDetector: const OpenCvDocumentDetector(),
     pageCorrector: const OpenCvPageCorrector(),
+    pageEnhancer: const OpenCvPageEnhancer(),
   );
   final recoverableSessions = await sessionManager.findRecoverableSessions();
   final cameraStartup = await CameraSession.initializeDefault();

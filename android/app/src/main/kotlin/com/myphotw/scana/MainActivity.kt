@@ -10,6 +10,7 @@ import android.provider.OpenableColumns
 import com.myphotw.scana.imageprocessing.OpenCvDocumentDetector
 import com.myphotw.scana.imageprocessing.OpenCvPageCorrector
 import com.myphotw.scana.imageprocessing.OpenCvPageCorrector.CurvedCorrectionException
+import com.myphotw.scana.imageprocessing.OpenCvPageEnhancer
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -20,6 +21,7 @@ class MainActivity : FlutterActivity() {
     private val detectorExecutor = Executors.newSingleThreadExecutor()
     private var detectorChannel: MethodChannel? = null
     private var correctorChannel: MethodChannel? = null
+    private var enhancerChannel: MethodChannel? = null
     private var pdfStorageChannel: MethodChannel? = null
     private var debugDiagnosticsChannel: MethodChannel? = null
     private var pendingDirectoryResult: MethodChannel.Result? = null
@@ -155,6 +157,77 @@ class MainActivity : FlutterActivity() {
                                         "correction_failed"
                                     },
                                     error.message ?: "Page correction failed.",
+                                    null,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        enhancerChannel =
+            MethodChannel(
+                flutterEngine.dartExecutor.binaryMessenger,
+                PAGE_ENHANCER_CHANNEL,
+            ).also { channel ->
+                channel.setMethodCallHandler { call, result ->
+                    if (call.method != "enhancePage") {
+                        result.notImplemented()
+                        return@setMethodCallHandler
+                    }
+                    val sourceImagePath = call.argument<String>("sourceImagePath")
+                    val outputImagePath = call.argument<String>("outputImagePath")
+                    val enhancementMode = call.argument<String>("enhancementMode")
+                    if (sourceImagePath.isNullOrBlank() ||
+                        outputImagePath.isNullOrBlank() ||
+                        enhancementMode.isNullOrBlank()
+                    ) {
+                        result.error(
+                            "invalid_enhancement_arguments",
+                            "Enhancement arguments are invalid.",
+                            null,
+                        )
+                        return@setMethodCallHandler
+                    }
+                    detectorExecutor.execute {
+                        try {
+                            val enhancement = OpenCvPageEnhancer.enhance(
+                                sourceImagePath,
+                                outputImagePath,
+                                enhancementMode,
+                            )
+                            debugLog(
+                                "IMAGE_PROCESSING",
+                                "Scan Enhancement: ${enhancement["processingMilliseconds"]} ms " +
+                                    "mode=$enhancementMode",
+                            )
+                            if (enhancementMode == "scanColor") {
+                                debugLog(
+                                    "ENHANCEMENT",
+                                    "background_analysis_ms=" +
+                                        "${enhancement["backgroundAnalysisMilliseconds"]} " +
+                                        "background_normalization_ms=" +
+                                        "${enhancement["backgroundNormalizationMilliseconds"]} " +
+                                        "background_whitening_ms=" +
+                                        "${enhancement["backgroundWhiteningMilliseconds"]} " +
+                                        "foreground_enhancement_ms=" +
+                                        "${enhancement["foregroundEnhancementMilliseconds"]} " +
+                                        "sharpening_ms=" +
+                                        "${enhancement["sharpeningMilliseconds"]} " +
+                                        "total_enhancement_ms=" +
+                                        "${enhancement["totalEnhancementMilliseconds"]}",
+                                )
+                            }
+                            runOnUiThread { result.success(enhancement) }
+                        } catch (error: Throwable) {
+                            debugLog(
+                                "IMAGE_PROCESSING",
+                                "Scan Enhancement failed mode=$enhancementMode " +
+                                    "error=${error.message}",
+                            )
+                            runOnUiThread {
+                                result.error(
+                                    "enhancement_failed",
+                                    error.message ?: "Page enhancement failed.",
                                     null,
                                 )
                             }
@@ -338,6 +411,8 @@ class MainActivity : FlutterActivity() {
         detectorChannel = null
         correctorChannel?.setMethodCallHandler(null)
         correctorChannel = null
+        enhancerChannel?.setMethodCallHandler(null)
+        enhancerChannel = null
         pdfStorageChannel?.setMethodCallHandler(null)
         pdfStorageChannel = null
         debugDiagnosticsChannel?.setMethodCallHandler(null)
@@ -567,6 +642,7 @@ class MainActivity : FlutterActivity() {
     private companion object {
         const val DOCUMENT_DETECTOR_CHANNEL = "com.myphotw.scana/document_detector"
         const val PAGE_CORRECTOR_CHANNEL = "com.myphotw.scana/page_corrector"
+        const val PAGE_ENHANCER_CHANNEL = "com.myphotw.scana/page_enhancer"
         const val PDF_STORAGE_CHANNEL = "com.myphotw.scana/pdf_storage"
         const val DEBUG_DIAGNOSTICS_CHANNEL = "com.myphotw.scana/debug_diagnostics"
         const val PDF_PREFERENCES = "scana_pdf_storage"

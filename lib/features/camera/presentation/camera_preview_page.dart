@@ -7,7 +7,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import 'package:scana/features/scan_result/presentation/scan_result_viewer_page.dart';
 import 'package:scana/features/scan_result/presentation/page_management_page.dart';
 import 'package:scana/features/scan_session/application/scan_session_manager.dart';
 import 'package:scana/models/scan_page.dart';
@@ -122,7 +121,7 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
           if (recoverySession.pages.isNotEmpty && mounted) {
             await Navigator.of(context).push(
               MaterialPageRoute<void>(
-                builder: (context) => ScanResultViewerPage(
+                builder: (context) => PageManagementPage(
                   sessionManager: widget.sessionManager,
                   cameraStartup: widget.cameraStartup,
                 ),
@@ -718,7 +717,7 @@ class RecentScanGalleryButton extends StatelessWidget {
                 child: Transform.rotate(
                   angle: page.rotation * math.pi / 180,
                   child: Image.file(
-                    File(page.correctedImagePath ?? page.rawImagePath),
+                    File(page.displayImagePath),
                     fit: BoxFit.cover,
                     errorBuilder: (context, error, stackTrace) {
                       return const ColoredBox(

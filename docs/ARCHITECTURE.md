@@ -6,14 +6,14 @@
 
 ## 처리 흐름
 
-카메라 프리뷰 → 촬영 가이드 → ScanSession → 원본 저장 → 문서 검출 → 자동 원근 보정 → Scan Result Viewer → (상세 편집 또는 페이지 관리) → 곡면 보정 → 화질 보정 → PDF 편집 → OCR 제목 추천 → PDF 생성 → 사용자 지정 위치 저장
+카메라 프리뷰 → 촬영 가이드 → ScanSession → 원본 저장 → 문서 검출 → 자동 원근 보정 → 자동 Scan Color 화질 보정 → Gallery/Viewer → (상세 편집 또는 페이지 관리) → 선택적 곡면·화질 재보정 → PDF Review → PDF 생성 → 사용자 지정 위치 저장
 
 촬영 직후 PDF를 만들지 않는다. 원본과 각 보정 단계의 결과를 분리해 재편집과 재촬영을 지원한다.
 
 ## ScanSession 영속화
 
 - 작업 파일은 앱 전용 영속 디렉터리의 `scan_sessions/<session_uuid>/`에 저장한다.
-- `session.json`에는 Session ID, 생성 시간, 페이지 배열 순서, 원본/보정 파일명, 페이지 번호, 생성 시간, 회전, 원본 크기, 선택적 문서 모서리 좌표, 보정 상태와 보정 방식을 저장한다.
+- `session.json`에는 Session ID, 생성 시간, 페이지 배열 순서, raw/corrected/enhanced 상대 파일명, 페이지 번호, 생성 시간, 회전, 원본 크기, 선택적 문서 모서리 좌표, 원근·곡면 보정 상태와 화질 보정 모드·상태를 저장한다.
 - JSON에는 절대 경로를 기록하지 않는다. 런타임에 Session 디렉터리와 상대 파일명을 결합한다.
 - Recovery는 `session.json`을 우선 사용하고, 없거나 손상된 경우에만 `raw_*.jpg`를 탐색해 복구한다.
 - 취소와 향후 PDF 저장 성공 시에만 Session 디렉터리를 삭제한다.
@@ -40,22 +40,35 @@
 - 출력은 먼저 숨김 pending JPEG에 기록하고 성공한 경우에만 새 `corrected_*.jpg` revision을 확정한 뒤 메타데이터 참조를 전환한다. Curved 단계 실패 시 직전에 확정한 Perspective 파일을 ScanPage가 계속 참조한다.
 - Page Editor는 원본/보정본 전환, Perspective/Curved 수동 선택, 모서리 저장 후 재보정을 제공한다. Corner Preview에는 핸들 반경만큼 내부 여유를 두고 저장·보정 액션은 Preview 아래 SafeArea 툴바에 둔다.
 
+## 화질 보정 계층
+
+- Flutter의 `PageEnhancer` 계약과 `OpenCvPageEnhancer` 구현을 분리해 UI가 MethodChannel/OpenCV에 직접 의존하지 않는다.
+- 촬영 처리 큐는 Detection → Perspective → 기본 `scanColor`를 기존 단일 Android executor에서 순차 실행하며 Camera Preview와 다음 촬영을 막지 않는다.
+- M8.1 Scan Color는 LAB 휘도 채널의 최대 변 1200px 분석 이미지에서 morphology closing으로 문자 같은 작은 dark component를 제거한 뒤 broad Gaussian background map을 만든다. full-resolution 휘도는 안전 clamp가 적용된 division normalization으로 paper target에 맞춘다.
+- 밝은 휘도, 낮은 LAB chroma, 낮은 9x9 local texture를 동시에 만족하는 영역만 paper soft mask로 사용한다. smoothstep LUT가 이 영역의 높은 tone만 white 쪽으로 압축하므로 사진·컬러 도표와 dark foreground의 계조는 유지된다. 종이 주변의 약한 gray component는 함께 완화되어 bleed-through가 억제된다.
+- 앞면 문자와 표 선은 밝은 background 위의 강한 local dark-detail로 분리한다. 전역 CLAHE 대신 foreground tone curve를 적용하고 Laplacian edge와 교차하는 부분에만 24% unsharp candidate를 반영해 paper texture와 JPEG noise의 재강조를 제한한다.
+- LAB a/b 중성화는 전역 적용하지 않고 paper mask 안에서만 34% 적용한다. 컬러 글자·그래프·로고·사진은 chroma/texture mask로 whitening과 중성화 대상에서 제외한다.
+- Grayscale은 RGB 평균 대신 luminance 변환 뒤 같은 배경 정규화·국부 대비·가벼운 sharpening을 사용한다. Black & White는 정규화 휘도에 3x3 median과 해상도 비례 adaptive Gaussian threshold를 적용한다.
+- 최종 출력은 Perspective 해상도를 유지한 JPEG quality 96이다. 분석 map만 축소하고 full-resolution mask 합성은 8-bit 차이 영상으로 수행해 float Mat 중복을 피한다. 모든 중간 `Mat`은 성공·실패 경로에서 즉시 release한다.
+- DEBUG 로그는 background analysis, normalization, whitening, foreground enhancement, sharpening, 전체 enhancement 시간을 각각 기록한다. Release에서는 기존 `isDebuggable` guard로 상세 로그를 남기지 않는다.
+- 출력은 `.enhanced_*.pending.jpg`에 먼저 쓰고 성공 후 `enhanced_*.jpg` revision으로 확정한다. 실패하면 상태만 failed로 기록하고 corrected/raw 참조를 보호한다.
+
 ## Scan Result UX
 
-- Camera의 기본 촬영 흐름은 raw 저장·문서 검출 후 자동 Perspective Correction을 처리 큐에서 실행하고 Camera Preview를 유지한다. 자동 Curved Correction은 안정성 우선으로 아직 실행하지 않으며 상세 편집에서만 `책/곡면 문서 보정`으로 수동 선택한다.
+- Camera의 기본 촬영 흐름은 raw 저장·문서 검출·자동 Perspective Correction·Scan Color Enhancement를 처리 큐에서 실행하고 Camera Preview를 유지한다. 자동 Curved Correction은 안정성 우선으로 아직 실행하지 않으며 상세 편집에서만 `책/곡면 문서 보정`으로 수동 선택한다.
 - Capture Guide는 화면 비율에서 계산한 normalized 영역으로 전달되고, 검출 결과의 원본 크기가 확인되면 source-pixel Corner로 변환해 session.json에 저장된다. 편집은 사용자 수정 Corner, 자동 검출 Corner, 저장된 Guide Corner 순서로 복원한다.
 - Camera에는 촬영 완료 버튼을 두지 않는다. 최근 스캔본과 페이지 수 Badge가 PDF Selection Gallery 진입점이며, Gallery Back은 Session을 유지한 Camera로 돌아간다.
-- Gallery는 corrected 우선 대형 반응형 Grid, 전체/개별 선택, 삭제와 상세 Viewer 진입만 제공한다. 선택 snapshot은 현재 Session 순서로 Review에 전달한다.
+- Gallery는 enhanced → corrected → raw 우선 대형 반응형 Grid, 전체/개별 선택, 삭제와 상세 Viewer 진입만 제공한다. 선택 snapshot은 현재 Session 순서로 Review에 전달한다.
 - `PdfPageReviewPage`는 선택된 페이지만 담은 자체 배열을 소유한다. Long Press Drag 중에는 route pop과 PDF 실행을 차단하며, 정렬 결과는 Session 배열을 변경하지 않는다. Review Viewer는 선택 snapshot과 자체 PageController만 소유한다.
-- Viewer는 corrected 이미지를 우선 표시하고 없을 때만 raw를 fallback으로 사용한다. `PageView` Swipe, 현재/전체 페이지 표시, 재촬영·편집·삭제만 제공한다.
+- Viewer는 페이지의 화질 모드를 반영해 enhanced → corrected → raw 순서로 표시한다. `PageView` Swipe, 현재/전체 페이지 표시, 재촬영·편집·삭제만 제공한다.
 - 상세 편집은 원본, Corner, 수동 재보정, 회전을 담당한다. 전체 썸네일과 Drag & Drop 재정렬은 별도 페이지 관리 화면의 책임이다.
 - 재촬영 후보는 Session에 넣기 전에 raw·검출·Perspective 저장을 모두 완료한다. 성공 시에만 기존 위치를 교체하고, 이후 이전 raw/corrected revision을 삭제한다.
-- Recovery에서 이어하기를 선택하면 Camera가 아닌 Scan Result Viewer를 연다.
+- Recovery에서 이어하기를 선택하면 PDF Selection Gallery를 연다. 삭제 후 새 스캔은 Session을 제거하고 Camera로, Gallery Back은 Session을 유지한 Camera로 이동한다.
 
 ## PDF Export 계층
 
 - `PdfExportSelection.fromOrderedRawPaths`는 Review가 확정한 `rawImagePath` 순서대로 페이지만 수집한다. PDF 순서는 `pageNo`가 아니라 Review의 최종 배열 순서다.
-- 입력은 `correctedImagePath ?? rawImagePath`로 결정하고, 원본 파일을 변경하지 않은 채 PDF `MemoryImage` orientation으로 0/90/180/270 회전을 적용한다.
+- 입력은 페이지 모드를 반영한 `enhancedImagePath ?? correctedImagePath ?? rawImagePath`로 결정하고, 원본 모드는 corrected를 사용한다. 파일을 변경하지 않은 채 PDF `MemoryImage` orientation으로 0/90/180/270 회전을 적용한다.
 - `PdfPageSizingPolicy.fitImage`는 회전 후 이미지 종횡비를 유지하면서 페이지 자체를 같은 비율로 구성해 왜곡과 불필요한 여백을 피한다. 향후 A4/Letter 정책을 같은 계약에 추가할 수 있다.
 - `DartPdfGenerator`는 별도 isolate에서 페이지 파일을 하나씩 읽고 진행률을 UI로 전달한다. 문서는 앱 임시 디렉터리의 pending PDF로 생성하고 PDF 헤더와 파일 크기를 검증한다.
 - Android `pdf_storage` MethodChannel은 `ACTION_OPEN_DOCUMENT_TREE`로 폴더를 선택하고 persistable read/write URI permission과 최근 URI를 앱 SharedPreferences에 보관한다. `DocumentsContract.createDocument`로 최종 PDF를 생성하며 광범위 저장소 권한은 사용하지 않는다.

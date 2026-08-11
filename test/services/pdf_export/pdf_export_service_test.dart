@@ -8,6 +8,7 @@ import 'package:scana/features/scan_session/application/scan_session_manager.dar
 import 'package:scana/models/page_correction.dart';
 import 'package:scana/models/scan_capture_mode.dart';
 import 'package:scana/models/scan_page.dart';
+import 'package:scana/models/page_enhancement.dart';
 import 'package:scana/services/pdf_export/pdf_export_service.dart';
 import 'package:scana/services/storage/scan_session_storage.dart';
 
@@ -61,6 +62,48 @@ void main() {
     );
 
     expect(selection.pages.map((page) => page.rotation), [0, 90, 180, 270]);
+  });
+
+  test('PDF uses enhanced, corrected, then raw fallback per page', () {
+    final pages = [
+      ScanPage(
+        pageNo: 1,
+        rawImagePath: '/raw_1.jpg',
+        correctedImagePath: '/corrected_1.jpg',
+        enhancedImagePath: '/enhanced_1.jpg',
+        enhancementStatus: EnhancementStatus.completed,
+        createdTime: DateTime.utc(2026, 8, 11),
+      ),
+      ScanPage(
+        pageNo: 2,
+        rawImagePath: '/raw_2.jpg',
+        correctedImagePath: '/corrected_2.jpg',
+        enhancedImagePath: '/stale_enhanced_2.jpg',
+        enhancementStatus: EnhancementStatus.completed,
+        enhancementMode: EnhancementMode.originalColor,
+        createdTime: DateTime.utc(2026, 8, 11),
+      ),
+      ScanPage(
+        pageNo: 3,
+        rawImagePath: '/raw_3.jpg',
+        correctedImagePath: '/corrected_3.jpg',
+        enhancementStatus: EnhancementStatus.failed,
+        createdTime: DateTime.utc(2026, 8, 11),
+      ),
+      _page(4, '/raw_4.jpg'),
+    ];
+
+    final selection = PdfExportSelection.fromSessionPages(
+      pages,
+      pages.map((page) => page.rawImagePath).toSet(),
+    );
+
+    expect(selection.pages.map((page) => page.sourceImagePath), [
+      '/enhanced_1.jpg',
+      '/corrected_2.jpg',
+      '/corrected_3.jpg',
+      '/raw_4.jpg',
+    ]);
   });
 
   test('review final order is preserved as the PDF page order', () {

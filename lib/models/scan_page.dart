@@ -1,6 +1,7 @@
 import 'package:scana/models/document_detection_result.dart';
 import 'package:scana/models/page_correction.dart';
 import 'package:scana/models/page_boundary.dart';
+import 'package:scana/models/page_enhancement.dart';
 
 /// A raw page captured during a scan session.
 class ScanPage {
@@ -21,6 +22,9 @@ class ScanPage {
     this.correctionStatus = CorrectionStatus.none,
     this.correctionType = CorrectionType.perspective,
     this.correctionOutcome = CorrectionOutcome.none,
+    this.enhancedImagePath,
+    this.enhancementMode = EnhancementMode.scanColor,
+    this.enhancementStatus = EnhancementStatus.none,
   }) : assert(
          rotation == 0 || rotation == 90 || rotation == 180 || rotation == 270,
        );
@@ -41,6 +45,21 @@ class ScanPage {
   final CorrectionStatus correctionStatus;
   final CorrectionType correctionType;
   final CorrectionOutcome correctionOutcome;
+  final String? enhancedImagePath;
+  final EnhancementMode enhancementMode;
+  final EnhancementStatus enhancementStatus;
+
+  /// Final page appearance shared by Viewer, Gallery, PDF, and thumbnails.
+  String get displayImagePath {
+    if (enhancementMode == EnhancementMode.originalColor) {
+      return correctedImagePath ?? rawImagePath;
+    }
+    if (enhancementStatus == EnhancementStatus.completed &&
+        enhancedImagePath != null) {
+      return enhancedImagePath!;
+    }
+    return correctedImagePath ?? rawImagePath;
+  }
 
   ScanPage copyWith({
     int? pageNo,
@@ -57,6 +76,9 @@ class ScanPage {
     CorrectionStatus? correctionStatus,
     CorrectionType? correctionType,
     CorrectionOutcome? correctionOutcome,
+    String? enhancedImagePath,
+    EnhancementMode? enhancementMode,
+    EnhancementStatus? enhancementStatus,
   }) {
     return ScanPage(
       pageNo: pageNo ?? this.pageNo,
@@ -76,6 +98,9 @@ class ScanPage {
       correctionStatus: correctionStatus ?? this.correctionStatus,
       correctionType: correctionType ?? this.correctionType,
       correctionOutcome: correctionOutcome ?? this.correctionOutcome,
+      enhancedImagePath: enhancedImagePath ?? this.enhancedImagePath,
+      enhancementMode: enhancementMode ?? this.enhancementMode,
+      enhancementStatus: enhancementStatus ?? this.enhancementStatus,
     );
   }
 
@@ -106,6 +131,7 @@ class ScanPage {
       pageBoundary: pageBoundary?.withRepresentativeCorners(corners),
       hasUserAdjustedCorners: true,
       correctionStatus: CorrectionStatus.none,
+      enhancementStatus: EnhancementStatus.none,
     );
   }
 
@@ -125,6 +151,19 @@ class ScanPage {
               ? CorrectionOutcome.completed
               : CorrectionOutcome.none),
       spreadFallbackUsed: false,
+      enhancementStatus: EnhancementStatus.none,
+    );
+  }
+
+  ScanPage withEnhancement({
+    required EnhancementMode mode,
+    required EnhancementStatus status,
+    String? enhancedImagePath,
+  }) {
+    return copyWith(
+      enhancementMode: mode,
+      enhancementStatus: status,
+      enhancedImagePath: enhancedImagePath,
     );
   }
 

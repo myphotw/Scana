@@ -92,7 +92,7 @@ class PdfExportSelection {
           .where((page) => selectedRawPaths.contains(page.rawImagePath))
           .map(
             (page) => PdfExportPage(
-              sourceImagePath: page.correctedImagePath ?? page.rawImagePath,
+              sourceImagePath: page.displayImagePath,
               rotation: page.rotation,
               pageNo: page.pageNo,
             ),
@@ -118,7 +118,7 @@ class PdfExportSelection {
           .whereType<ScanPage>()
           .map(
             (page) => PdfExportPage(
-              sourceImagePath: page.correctedImagePath ?? page.rawImagePath,
+              sourceImagePath: page.displayImagePath,
               rotation: page.rotation,
               pageNo: page.pageNo,
             ),

@@ -8,6 +8,8 @@ import 'package:scana/features/scan_result/presentation/pdf_page_review_page.dar
 import 'package:scana/features/scan_result/presentation/scan_result_viewer_page.dart';
 import 'package:scana/features/scan_session/application/scan_session_manager.dart';
 import 'package:scana/models/scan_page.dart';
+import 'package:scana/models/page_correction.dart';
+import 'package:scana/models/page_enhancement.dart';
 import 'package:scana/services/camera/camera_session.dart';
 import 'package:scana/services/pdf_export/pdf_export_service.dart';
 import 'package:scana/services/pdf_export/pdf_saf_storage.dart';
@@ -347,6 +349,11 @@ class _GalleryPageCard extends StatelessWidget {
                 ),
               ),
             Positioned(
+              top: 8,
+              left: 8,
+              child: _PageProcessingBadge(page: page),
+            ),
+            Positioned(
               left: 8,
               right: 4,
               bottom: 2,
@@ -373,6 +380,41 @@ class _GalleryPageCard extends StatelessWidget {
   }
 }
 
+class _PageProcessingBadge extends StatelessWidget {
+  const _PageProcessingBadge({required this.page});
+
+  final ScanPage page;
+
+  @override
+  Widget build(BuildContext context) {
+    final (label, color) = switch ((
+      page.correctionStatus,
+      page.enhancementStatus,
+    )) {
+      (CorrectionStatus.processing, _) => ('보정 중', Colors.orange),
+      (_, EnhancementStatus.processing) => ('스캔 처리 중', Colors.orange),
+      (CorrectionStatus.failed, _) => ('보정 실패', Colors.red),
+      (_, EnhancementStatus.failed) => ('처리 실패', Colors.red),
+      (_, EnhancementStatus.completed) => ('완료', Colors.green),
+      _ => ('검출 중', Colors.blueGrey),
+    };
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.88),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+        child: Text(
+          label,
+          key: ValueKey('page-processing-${page.rawImagePath}'),
+          style: const TextStyle(color: Colors.white, fontSize: 11),
+        ),
+      ),
+    );
+  }
+}
+
 class _PageImage extends StatelessWidget {
   const _PageImage({required this.page});
 
@@ -384,7 +426,7 @@ class _PageImage extends StatelessWidget {
       key: ValueKey('managed-thumbnail-rotation-${page.pageNo}'),
       angle: page.rotation * math.pi / 180,
       child: Image.file(
-        File(page.correctedImagePath ?? page.rawImagePath),
+        File(page.displayImagePath),
         fit: BoxFit.contain,
         errorBuilder: (context, error, stackTrace) =>
             const Center(child: Icon(Icons.image_not_supported_outlined)),
