@@ -2,6 +2,9 @@
 
 최종 갱신: 2026-08-11
 
+| UX-Q1 Camera boundary / PDF reorder / Android Navigation | 구현 | 실기기 위치·애니메이션·Navigation 접근성 확인 필요 |
+| Q1.1 Live overlay / Live reorder / 실제 책 crop 재튜닝 | 구현 | 동일 악보 Single/Spread 재촬영 검증 필요 |
+
 | 항목 | 상태 | 비고 |
 | --- | --- | --- |
 | Android 전용 Flutter 기본 프로젝트 | 완료 | applicationId: com.myphotw.scana |
@@ -28,12 +31,12 @@
 | M9 로컬 OCR | 완료 | bundled ML Kit Korean 16.0.1, Review background 제목 제안, 2페이지 fallback |
 | M9 PDF 완료 UX | 완료 | 결과 URI/파일명/크기/페이지 수 보존, 새 스캔·ACTION_VIEW 파일 열기 |
 | 화면 방향 UX | 완료 | Single Camera Portrait, Spread Camera Landscape, Camera 외 작업 화면 Portrait, 외부 Viewer 복귀 재적용 |
+| Q1 Book/Page Boundary Detection Quality Improvement | 구현 완료, 실기기 검증 필요 | 악보 내부선 감점, page occupancy·border·contrast·paper score 강화, Spread spine-side fallback |
 | 외부 라이브러리 | 사용 중 | camera, path, path_provider, pdf, uuid, OpenCV, ML Kit Text Recognition Korean |
 
 ## Known Issues
 
 - 파일명 Dialog controller premature dispose가 `_dependents.isEmpty`와 Duplicate GlobalKeys의 최초 원인으로 확인되어 M7.2.3에서 수정함. 실기기 재검증 필요
-- 1페이지 문서 검출이 실기기 조건에 따라 일부 영역을 잘못 crop하는 경우가 있음
-- 2페이지 모드는 좌/우 ROI 분리는 동작하지만 각 페이지 자동 영역 검출 정확도가 부족함
+- Q1 detector scoring 개선은 synthetic test와 Android build를 통과했으나 실제 책·악보 재촬영으로 최종 판정해야 함
 - 곡면 문서 보정은 아직 품질이 충분하지 않아 추후 개선 예정
 - 2페이지 가로 촬영 UI 및 촬영 버튼 위치는 정상 동작 확인

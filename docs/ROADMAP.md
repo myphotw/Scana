@@ -1,5 +1,12 @@
 ﻿# 로드맵
 
+## Q1.1 검증
+
+- Camera에서 unstable/stable live boundary 표시 및 Portrait/Spread 좌표 확인
+- PDF Review에서 여러 row와 2~4 column을 넘나드는 live reorder 확인
+- Minuet 악보 재촬영으로 narrow content crop 감소와 Spread 배경 포함 감소 확인
+- DEBUG candidate breakdown을 다음 실기기 튜닝 근거로 보관
+
 ## M1 — 기반 구조
 
 Android 전용 Flutter 앱 진입 구조, 모듈 폴더, 요구사항·설계·라이선스 문서를 준비한다.
@@ -47,6 +54,12 @@ Recovery의 기본 진입점을 PDF Selection Gallery로 변경하고, OpenCV �
 bundled Korean on-device OCR의 첫/두 번째 PDF 페이지 제목 제안, Session 재사용, 날짜 fallback, PDF 저장 결과 보존, Review 내부 완료 UX와 Android PDF Viewer 열기를 구현한다.
 
 Camera 역할 기반 방향 정책을 추가해 Single은 Portrait, Spread는 Landscape를 사용하고 Gallery·Viewer·Editor·PDF flow는 Portrait으로 고정한다.
+
+## Q1 — Book/Page Boundary Detection Quality Improvement
+
+악보·표·내부 frame의 강한 선을 page boundary로 오인하는 문제를 개선한다. 페이지 점유율, ROI 외곽 접근성, 경계 안/밖 대비, 종이 내부 특성, 외곽 연속성을 우선하고 내부선과 좁은 crop을 감점한다. Spread ROI 비율은 유지하며 outer/top/bottom evidence가 충분할 때 약한 spine-side edge를 보완한다.
+
+구현 후 synthetic 회귀 테스트와 APK 빌드를 통과하더라도 실제 책·악보를 Single/Spread로 다시 촬영해 최종 품질을 판단한다.
 
 ## 향후 OCR
 

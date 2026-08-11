@@ -23,8 +23,11 @@ import java.io.File
 object OpenCvDocumentDetector {
     private const val MAX_DETECTION_DIMENSION = 1400.0
     private const val MAX_PREVIEW_DIMENSION = 720.0
-    private const val MIN_AREA_RATIO = 0.05
+    private const val MIN_AREA_RATIO = 0.12
     private const val MIN_CANDIDATE_SCORE = 0.32
+    private const val MIN_BOUNDARY_CONFIDENCE = 0.38
+    private const val MIN_PREVIEW_CANDIDATE_SCORE = 0.22
+    private const val MIN_PREVIEW_BOUNDARY_CONFIDENCE = 0.22
     private const val MAX_ASPECT_RATIO = 8.0
     private const val BOUNDARY_SAMPLE_COUNT = 24
 
@@ -149,18 +152,21 @@ object OpenCvDocumentDetector {
                     ),
                 )
             }
-            val best = candidates
-                .filter { it.score >= MIN_CANDIDATE_SCORE }
-                .maxByOrNull { it.score }
-                ?: return notDetected(sourceWidth, sourceHeight)
-            logCandidate(best, pageSide, debugLogging)
+            val eligible = candidates
+                .filter {
+                    it.score >= MIN_CANDIDATE_SCORE &&
+                        it.confidence >= MIN_BOUNDARY_CONFIDENCE
+                }
+            val best = selectConservativeCandidate(eligible, imageArea)
+            logCandidates(candidates, pageSide, debugLogging, best)
+            if (best == null) return notDetected(sourceWidth, sourceHeight)
             val ordered = orderCorners(best.points).map { point ->
                 Point(point.x / scale, point.y / scale)
             }
 
             return mapOf(
                 "detected" to true,
-                "confidence" to best.score.coerceIn(0.0, 1.0),
+                "confidence" to best.confidence,
                 "sourceWidth" to sourceWidth,
                 "sourceHeight" to sourceHeight,
                 "corners" to ordered.map(::pointMap),
@@ -170,7 +176,7 @@ object OpenCvDocumentDetector {
                     scale,
                     sourceWidth,
                     sourceHeight,
-                    best.score,
+                    best.confidence,
                     best.spineSide,
                     best.clippingEvidence,
                 ),
@@ -384,13 +390,16 @@ object OpenCvDocumentDetector {
                         resized.size(),
                         imageArea,
                     )
-                }).filter { it.score >= MIN_CANDIDATE_SCORE }
+                }).filter {
+                    it.score >= MIN_PREVIEW_CANDIDATE_SCORE &&
+                        it.confidence >= MIN_PREVIEW_BOUNDARY_CONFIDENCE
+                }
                     .maxByOrNull { it.score }
                     ?: return notDetected(width, height)
             val ordered = orderCorners(best.points).map { Point(it.x / scale, it.y / scale) }
             return mapOf(
                 "detected" to true,
-                "confidence" to best.score.coerceIn(0.0, 1.0),
+                "confidence" to best.confidence,
                 "sourceWidth" to width,
                 "sourceHeight" to height,
                 "corners" to ordered.map(::pointMap),
@@ -400,7 +409,7 @@ object OpenCvDocumentDetector {
                     scale,
                     width,
                     height,
-                    best.score,
+                    best.confidence,
                     best.spineSide,
                     best.clippingEvidence,
                 ),
@@ -456,6 +465,9 @@ object OpenCvDocumentDetector {
             if (areaRatio > 0.94 && edgePointCount >= 3) return null
 
             val bounds = Imgproc.boundingRect(approximationInt)
+            val widthRatio = bounds.width / imageSize.width
+            val heightRatio = bounds.height / imageSize.height
+            if (widthRatio < 0.30 || heightRatio < 0.30) return null
             val shortSide = min(bounds.width, bounds.height).coerceAtLeast(1)
             val longSide = max(bounds.width, bounds.height)
             val aspectRatio = longSide.toDouble() / shortSide.toDouble()
@@ -523,39 +535,88 @@ object OpenCvDocumentDetector {
             if (validation.outsideContentContinuation >= maximumContinuation) return null
             val sidePolicy = pageSidePolicyScore(points, pageSide, imageSize, longLines)
             val overlapPenalty = overlapExpansionPenalty(points, pageSide, imageSize)
+            val occupancy = occupancyScore(areaRatio, pageSide)
+            val borderProximity = borderProximityScore(points, imageSize, pageSide)
+            val paperScore = paperInteriorScore(regionSignals)
+            val smallCandidatePenalty = smallCandidatePenalty(areaRatio, pageSide)
+            val internalLinePenalty = max(
+                internalLinePenalty(
+                    contrastScore,
+                    borderProximity,
+                    smallCandidatePenalty,
+                    validation.outsideContentContinuation,
+                ),
+                repeatedHorizontalBoundaryPenalty(points, longLines),
+            )
+            val minimumModeArea = if (pageSide == null) 0.14 else 0.24
+            val minimumWidth = if (pageSide == null) 0.46 else 0.42
+            val minimumHeight = if (pageSide == null) 0.48 else 0.48
+            if (areaRatio < minimumModeArea || widthRatio < minimumWidth ||
+                heightRatio < minimumHeight || internalLinePenalty >= 0.82
+            ) return null
             val score = when (kind) {
                 CandidateKind.openBookSpread -> documentScore - 0.24
                 CandidateKind.bookPage ->
-                    max(documentScore, bookScore) * 0.82 +
-                        validation.outerBoundaryContinuity * 0.08 +
-                        validation.contentContainment * 0.05 +
-                        envelopeContainment * 0.13 +
-                        sidePolicy * 0.20 -
-                        validation.outsideContentContinuation * 0.20 -
-                        overlapPenalty * 0.22
+                    max(documentScore, bookScore) * 0.05 +
+                        occupancy * 0.22 +
+                        borderProximity * 0.16 +
+                        contrastScore * 0.11 +
+                        paperScore * 0.13 +
+                        rectangularity * 0.06 +
+                        validation.outerBoundaryContinuity * 0.10 +
+                        sidePolicy * 0.11 +
+                        envelopeContainment * 0.06 +
+                        spineProximity * 0.02 +
+                        curveScore * 0.02 -
+                        internalLinePenalty * 0.28 -
+                        smallCandidatePenalty * 0.22 -
+                        validation.outsideContentContinuation * 0.10 -
+                        overlapPenalty * 0.20
                 CandidateKind.document ->
-                    documentScore * 0.84 +
+                    documentScore * 0.08 +
+                        occupancy * 0.24 +
+                        borderProximity * 0.16 +
+                        contrastScore * 0.14 +
+                        paperScore * 0.14 +
+                        rectangularity * 0.08 +
                         validation.outerBoundaryContinuity * 0.08 +
-                        validation.contentContainment * 0.04 +
-                        envelopeContainment * 0.12 -
-                        validation.outsideContentContinuation * 0.16
+                        envelopeContainment * 0.08 -
+                        internalLinePenalty * 0.28 -
+                        smallCandidatePenalty * 0.22 -
+                        validation.outsideContentContinuation * 0.10
             }
+            val confidence = candidateConfidence(
+                occupancy,
+                borderProximity,
+                contrastScore,
+                paperScore,
+                rectangularity,
+                validation.outerBoundaryContinuity,
+                internalLinePenalty,
+                smallCandidatePenalty,
+            )
             return Candidate(
                 points,
                 contour.toArray(),
                 score,
+                confidence,
                 kind,
                 pageSide?.spineSide ?: if (kind == CandidateKind.bookPage) spineSideFor(points, spine) else null,
                 validation.clippingEvidence,
                 CandidateDebugScores(
-                    area = areaRatio,
+                    occupancy = occupancy,
+                    borderProximity = borderProximity,
+                    insideOutsideContrast = contrastScore,
+                    paperScore = paperScore,
+                    rectangularity = rectangularity,
+                    edgeContinuity = validation.outerBoundaryContinuity,
                     contentContainment = envelopeContainment,
-                    outerContinuity = validation.outerBoundaryContinuity,
-                    topContinuity = validation.topContinuity,
-                    bottomContinuity = validation.bottomContinuity,
-                    internalLinePenalty = validation.outsideContentContinuation,
-                    spineScore = spineProximity,
-                    sidePolicy = sidePolicy,
+                    internalLinePenalty = internalLinePenalty,
+                    smallCandidatePenalty = smallCandidatePenalty,
+                    outsideContinuationPenalty = validation.outsideContentContinuation,
+                    widthRatio = widthRatio,
+                    heightRatio = heightRatio,
+                    areaRatio = areaRatio,
                 ),
             )
         } finally {
@@ -629,6 +690,194 @@ object OpenCvDocumentDetector {
             .coerceIn(0.0, 1.0)
     }
 
+    /** Presentation-only preview ROI split. Detection scoring remains unchanged. */
+    fun detectPreviewForPage(
+        luminance: ByteArray, width: Int, height: Int, rowStride: Int,
+        pageSide: String, sensorOrientation: Int,
+    ): Map<String, Any> {
+        val left = pageSide == "left"
+        val start = if (left) 0.0 else 0.45
+        val end = if (left) 0.55 else 1.0
+        val roi = when (sensorOrientation) {
+            90 -> PreviewRoi(0, (height * (1 - end)).toInt(), width, (height * (1 - start)).toInt())
+            270 -> PreviewRoi(0, (height * start).toInt(), width, (height * end).toInt())
+            180 -> PreviewRoi((width * (1 - end)).toInt(), 0, (width * (1 - start)).toInt(), height)
+            else -> PreviewRoi((width * start).toInt(), 0, (width * end).toInt(), height)
+        }.clamped(width, height)
+        val cropped = ByteArray(roi.width * roi.height)
+        for (row in 0 until roi.height) {
+            System.arraycopy(luminance, (roi.top + row) * rowStride + roi.left, cropped, row * roi.width, roi.width)
+        }
+        val result = detectPreview(cropped, roi.width, roi.height, roi.width)
+        if (result["detected"] != true) return notDetected(width, height)
+        fun shift(value: Any?): Map<String, Double>? {
+            val point = value as? Map<*, *> ?: return null
+            val x = (point["x"] as? Number)?.toDouble() ?: return null
+            val y = (point["y"] as? Number)?.toDouble() ?: return null
+            return mapOf("x" to x + roi.left, "y" to y + roi.top)
+        }
+        val mapped = result.toMutableMap()
+        mapped["sourceWidth"] = width
+        mapped["sourceHeight"] = height
+        mapped["corners"] = (result["corners"] as? List<*>)?.mapNotNull(::shift) ?: emptyList<Map<String, Double>>()
+        val boundary = result["boundary"] as? Map<*, *>
+        if (boundary != null) {
+            val next = boundary.toMutableMap()
+            for (edge in listOf("top", "right", "bottom", "left")) {
+                next[edge] = (boundary[edge] as? List<*>)?.mapNotNull(::shift) ?: emptyList<Map<String, Double>>()
+            }
+            next["sourceWidth"] = width
+            next["sourceHeight"] = height
+            mapped["boundary"] = next
+        }
+        return mapped
+    }
+
+    private data class PreviewRoi(val left: Int, val top: Int, val right: Int, val bottom: Int) {
+        val width get() = right - left
+        val height get() = bottom - top
+        fun clamped(width: Int, height: Int): PreviewRoi {
+            val l = left.coerceIn(0, width - 1); val t = top.coerceIn(0, height - 1)
+            return PreviewRoi(l, t, right.coerceIn(l + 1, width), bottom.coerceIn(t + 1, height))
+        }
+    }
+
+    private fun occupancyScore(areaRatio: Double, pageSide: PageSide?): Double {
+        val floor = if (pageSide == null) 0.14 else 0.24
+        val preferred = if (pageSide == null) 0.72 else 0.68
+        return ((areaRatio - floor) / (preferred - floor)).coerceIn(0.0, 1.0)
+    }
+
+    private fun smallCandidatePenalty(areaRatio: Double, pageSide: PageSide?): Double {
+        val preferredMinimum = if (pageSide == null) 0.42 else 0.48
+        return ((preferredMinimum - areaRatio) / preferredMinimum).coerceIn(0.0, 1.0)
+    }
+
+    private fun borderProximityScore(
+        points: Array<Point>,
+        imageSize: Size,
+        pageSide: PageSide?,
+    ): Double {
+        val leftGap = points.minOf { it.x } / imageSize.width
+        val rightGap = (imageSize.width - points.maxOf { it.x }) / imageSize.width
+        val topGap = points.minOf { it.y } / imageSize.height
+        val bottomGap = (imageSize.height - points.maxOf { it.y }) / imageSize.height
+        fun proximity(gap: Double, tolerance: Double): Double =
+            (1.0 - gap / tolerance).coerceIn(0.0, 1.0)
+        val top = proximity(topGap, 0.30)
+        val bottom = proximity(bottomGap, 0.30)
+        if (pageSide == null) {
+            return (
+                proximity(leftGap, 0.30) +
+                    proximity(rightGap, 0.30) +
+                    top +
+                    bottom
+                ) / 4.0
+        }
+        val outer = if (pageSide == PageSide.left) {
+            proximity(leftGap, 0.26)
+        } else {
+            proximity(rightGap, 0.26)
+        }
+        val spine = if (pageSide == PageSide.left) {
+            proximity(rightGap, 0.40)
+        } else {
+            proximity(leftGap, 0.40)
+        }
+        return outer * 0.36 + top * 0.27 + bottom * 0.27 + spine * 0.10
+    }
+
+    private fun paperInteriorScore(signals: RegionSignals): Double {
+        val brightness = (signals.meanBrightness / 210.0).coerceIn(0.0, 1.0)
+        val foregroundStructure = (signals.textDensity / 0.55).coerceIn(0.0, 1.0)
+        return (
+            brightness * 0.30 +
+                signals.brightPixelRatio * 0.32 +
+                signals.brightnessConsistency * 0.20 +
+                foregroundStructure * 0.18
+            ).coerceIn(0.0, 1.0)
+    }
+
+    private fun internalLinePenalty(
+        boundaryContrast: Double,
+        borderProximity: Double,
+        smallCandidatePenalty: Double,
+        outsideContentContinuation: Double,
+    ): Double {
+        val paperOnBothSides = 1.0 - boundaryContrast
+        val centered = 1.0 - borderProximity
+        return (
+            paperOnBothSides * centered * 0.42 +
+                smallCandidatePenalty * 0.28 +
+                outsideContentContinuation * 0.30
+            ).coerceIn(0.0, 1.0)
+    }
+
+    private fun repeatedHorizontalBoundaryPenalty(
+        points: Array<Point>,
+        lines: List<LineSegment>,
+    ): Double {
+        val corners = orderCorners(points)
+        val topY = (corners[0].y + corners[1].y) / 2.0
+        val bottomY = (corners[2].y + corners[3].y) / 2.0
+        val height = max(1.0, bottomY - topY)
+        val width = max(1.0, points.maxOf { it.x } - points.minOf { it.x })
+        val nearBoundary = lines.count { line ->
+            val dx = abs(line.end.x - line.start.x)
+            val dy = abs(line.end.y - line.start.y)
+            val middleY = (line.start.y + line.end.y) / 2.0
+            dx >= width * 0.18 && dy <= dx * 0.12 &&
+                (abs(middleY - topY) <= height * 0.055 ||
+                    abs(middleY - bottomY) <= height * 0.055)
+        }
+        return when {
+            nearBoundary >= 5 -> 0.92
+            nearBoundary >= 3 -> 0.74
+            nearBoundary >= 2 -> 0.52
+            else -> 0.0
+        }
+    }
+
+    private fun candidateConfidence(
+        occupancy: Double,
+        borderProximity: Double,
+        contrast: Double,
+        paperScore: Double,
+        rectangularity: Double,
+        edgeContinuity: Double,
+        internalLinePenalty: Double,
+        smallCandidatePenalty: Double,
+    ): Double = (
+        occupancy * 0.23 +
+            borderProximity * 0.15 +
+            contrast * 0.17 +
+            paperScore * 0.16 +
+            rectangularity * 0.10 +
+            edgeContinuity * 0.19 -
+            internalLinePenalty * 0.24 -
+            smallCandidatePenalty * 0.18
+        ).coerceIn(0.0, 1.0)
+
+    private fun selectConservativeCandidate(
+        candidates: List<Candidate>,
+        imageArea: Double,
+    ): Candidate? {
+        val highest = candidates.maxByOrNull { it.score } ?: return null
+        val highestArea = polygonArea(highest.points) / imageArea
+        val alternatives = candidates.filter { candidate ->
+            val area = polygonArea(candidate.points) / imageArea
+            val evidence = candidate.debugScores
+            area >= highestArea * 1.16 &&
+                candidate.score >= highest.score - 0.10 &&
+                evidence.paperScore >= 0.50 &&
+                evidence.insideOutsideContrast >= 0.16 &&
+                evidence.internalLinePenalty < 0.62 &&
+                evidence.outsideContinuationPenalty <=
+                    highest.debugScores.outsideContinuationPenalty + 0.10
+        }
+        return alternatives.maxByOrNull { polygonArea(it.points) } ?: highest
+    }
+
     private fun collectLongLines(edges: Mat, imageSize: Size): List<LineSegment> {
         val lines = Mat()
         try {
@@ -675,7 +924,8 @@ object OpenCvDocumentDetector {
     private fun brightnessBoundaryScore(points: Array<Point>, gray: Mat): Double {
         val ordered = orderCorners(points)
         val margin = min(gray.cols(), gray.rows()) * 0.018
-        val differences = mutableListOf<Double>()
+        val luminanceDifferences = mutableListOf<Double>()
+        val varianceDifferences = mutableListOf<Double>()
         for (index in ordered.indices) {
             val start = ordered[index]
             val end = ordered[(index + 1) % ordered.size]
@@ -688,26 +938,39 @@ object OpenCvDocumentDetector {
             for (ratio in listOf(0.25, 0.5, 0.75)) {
                 val x = start.x + dx * ratio
                 val y = start.y + dy * ratio
-                val insideX = (x + normalX * margin).roundToInt()
-                val insideY = (y + normalY * margin).roundToInt()
-                val outsideX = (x - normalX * margin).roundToInt()
-                val outsideY = (y - normalY * margin).roundToInt()
-                if (insideX !in 0 until gray.cols() ||
-                    insideY !in 0 until gray.rows() ||
-                    outsideX !in 0 until gray.cols() ||
-                    outsideY !in 0 until gray.rows()
-                ) {
-                    continue
+                val insideValues = mutableListOf<Double>()
+                val outsideValues = mutableListOf<Double>()
+                for (depth in listOf(0.65, 1.0, 1.35)) {
+                    val insideX = (x + normalX * margin * depth).roundToInt()
+                    val insideY = (y + normalY * margin * depth).roundToInt()
+                    val outsideX = (x - normalX * margin * depth).roundToInt()
+                    val outsideY = (y - normalY * margin * depth).roundToInt()
+                    if (insideX !in 0 until gray.cols() ||
+                        insideY !in 0 until gray.rows() ||
+                        outsideX !in 0 until gray.cols() ||
+                        outsideY !in 0 until gray.rows()
+                    ) continue
+                    gray.get(insideY, insideX)?.firstOrNull()?.let(insideValues::add)
+                    gray.get(outsideY, outsideX)?.firstOrNull()?.let(outsideValues::add)
                 }
-                val inside = gray.get(insideY, insideX)?.firstOrNull()
-                val outside = gray.get(outsideY, outsideX)?.firstOrNull()
-                if (inside != null && outside != null) {
-                    differences.add(abs(inside - outside) / 255.0)
-                }
+                if (insideValues.size < 2 || outsideValues.size < 2) continue
+                val insideMean = insideValues.average()
+                val outsideMean = outsideValues.average()
+                val insideVariance = insideValues.sumOf { (it - insideMean) * (it - insideMean) } /
+                    insideValues.size
+                val outsideVariance = outsideValues.sumOf { (it - outsideMean) * (it - outsideMean) } /
+                    outsideValues.size
+                luminanceDifferences.add(abs(insideMean - outsideMean) / 255.0)
+                varianceDifferences.add(
+                    (abs(sqrt(insideVariance) - sqrt(outsideVariance)) / 64.0)
+                        .coerceIn(0.0, 1.0),
+                )
             }
         }
-        return if (differences.isEmpty()) 0.0 else
-            (differences.average() * 3.0).coerceIn(0.0, 1.0)
+        if (luminanceDifferences.isEmpty()) return 0.0
+        val luminance = (luminanceDifferences.average() * 3.0).coerceIn(0.0, 1.0)
+        val variance = if (varianceDifferences.isEmpty()) 0.0 else varianceDifferences.average()
+        return (luminance * 0.78 + variance * 0.22).coerceIn(0.0, 1.0)
     }
 
     private fun detectSpine(gray: Mat, lines: List<LineSegment>): SpineEvidence? {
@@ -871,35 +1134,74 @@ object OpenCvDocumentDetector {
     ): Candidate {
         val areaRatio = polygonArea(corners) / imageArea
         val signals = regionSignals(corners, gray, edges)
-        val score =
-            (areaRatio / 0.55).coerceIn(0.0, 1.0) * 0.14 +
-                rightAngleScore(corners) * 0.06 +
-                guideAlignmentScore(corners, imageSize) * 0.12 +
-                spine.strength * 0.20 +
-                signals.textDensity * 0.18 +
-                signals.brightnessConsistency * 0.10 +
-                curveDeviationScore(spineCurve, imageSize) * 0.12 +
-                brightnessBoundaryScore(corners, gray) * 0.08
         val validation = boundaryValidationSignals(corners, contour, gray, edges, imageSize)
-        val safeScore = if (
+        val pageSide = if (spineSide == SpineSide.right) PageSide.left else PageSide.right
+        val occupancy = occupancyScore(areaRatio, pageSide)
+        val borderProximity = borderProximityScore(corners, imageSize, pageSide)
+        val contrast = brightnessBoundaryScore(corners, gray)
+        val paperScore = paperInteriorScore(signals)
+        val rectangularity = rightAngleScore(corners)
+        val smallPenalty = smallCandidatePenalty(areaRatio, pageSide)
+        val linePenalty = internalLinePenalty(
+            contrast,
+            borderProximity,
+            smallPenalty,
+            validation.outsideContentContinuation,
+        )
+        val score = if (
             validation.selfIntersects ||
             validation.contentContainment < 0.72 ||
-            validation.outsideContentContinuation >= 0.42
+            validation.outsideContentContinuation >= 0.42 ||
+            areaRatio < 0.24 ||
+            linePenalty >= 0.82
         ) {
             -1.0
         } else {
-            score * 0.82 +
-                validation.outerBoundaryContinuity * 0.08 +
-                validation.contentContainment * 0.10 -
-                validation.outsideContentContinuation * 0.20
+            occupancy * 0.24 +
+                borderProximity * 0.18 +
+                contrast * 0.12 +
+                paperScore * 0.14 +
+                rectangularity * 0.08 +
+                validation.outerBoundaryContinuity * 0.10 +
+                spine.strength * 0.04 +
+                curveDeviationScore(spineCurve, imageSize) * 0.03 +
+                validation.contentContainment * 0.07 -
+                linePenalty * 0.28 -
+                smallPenalty * 0.22
         }
+        val confidence = candidateConfidence(
+            occupancy,
+            borderProximity,
+            contrast,
+            paperScore,
+            rectangularity,
+            validation.outerBoundaryContinuity,
+            linePenalty,
+            smallPenalty,
+        )
         return Candidate(
             corners,
             contour,
-            safeScore,
+            score,
+            confidence,
             CandidateKind.bookPage,
             spineSide,
             validation.clippingEvidence,
+            CandidateDebugScores(
+                occupancy = occupancy,
+                borderProximity = borderProximity,
+                insideOutsideContrast = contrast,
+                paperScore = paperScore,
+                rectangularity = rectangularity,
+                edgeContinuity = validation.outerBoundaryContinuity,
+                contentContainment = validation.contentContainment,
+                internalLinePenalty = linePenalty,
+                smallCandidatePenalty = smallPenalty,
+                outsideContinuationPenalty = validation.outsideContentContinuation,
+                widthRatio = (corners.maxOf { it.x } - corners.minOf { it.x }) / imageSize.width,
+                heightRatio = (corners.maxOf { it.y } - corners.minOf { it.y }) / imageSize.height,
+                areaRatio = areaRatio,
+            ),
         )
     }
 
@@ -926,12 +1228,15 @@ object OpenCvDocumentDetector {
                 total++
             }
         }
-        if (total == 0) return RegionSignals(0.0, 0.0)
+        if (total == 0) return RegionSignals(0.0, 0.0, 0.0, 0.0)
         val mean = brightness.average()
         val deviation = sqrt(brightness.sumOf { (it - mean) * (it - mean) } / brightness.size)
+        val brightPixelRatio = brightness.count { it >= 150.0 }.toDouble() / brightness.size
         return RegionSignals(
             textDensity = (edgeSamples.toDouble() / total * 9.0).coerceIn(0.0, 1.0),
             brightnessConsistency = (1.0 - deviation / 90.0).coerceIn(0.0, 1.0),
+            meanBrightness = mean,
+            brightPixelRatio = brightPixelRatio,
         )
     }
 
@@ -1120,6 +1425,7 @@ object OpenCvDocumentDetector {
             outerRange,
             0.05 to 0.95,
             outerTarget,
+            if (pageSide == PageSide.left) 1 else -1,
         )
         val spine = strongestVerticalAnchor(
             gray,
@@ -1127,6 +1433,7 @@ object OpenCvDocumentDetector {
             spineRange,
             0.05 to 0.95,
             spineTarget,
+            if (pageSide == PageSide.left) -1 else 1,
         )
         val ownedStart = if (pageSide == PageSide.left) outer.coordinate else spine.coordinate
         val ownedEnd = if (pageSide == PageSide.left) spine.coordinate else outer.coordinate
@@ -1137,6 +1444,7 @@ object OpenCvDocumentDetector {
             0.01 to 0.27,
             ownedStart / width to ownedEnd / width,
             0.04,
+            1,
         )
         val bottom = strongestHorizontalAnchor(
             gray,
@@ -1144,6 +1452,7 @@ object OpenCvDocumentDetector {
             0.73 to 0.99,
             ownedStart / width to ownedEnd / width,
             0.96,
+            -1,
         )
         if (bottom.coordinate - top.coordinate < height * 0.45) return null
         if (outer.support < 0.045 || top.support < 0.035 || bottom.support < 0.035) {
@@ -1172,33 +1481,74 @@ object OpenCvDocumentDetector {
             return null
         }
         val areaRatio = polygonArea(corners) / imageArea
-        val anchorScore =
-            outer.support * 0.22 +
-                top.support * 0.16 +
-                bottom.support * 0.16 +
+        val signals = regionSignals(corners, gray, edges)
+        val occupancy = occupancyScore(areaRatio, pageSide)
+        val borderProximity = borderProximityScore(corners, imageSize, pageSide)
+        val contrast = brightnessBoundaryScore(corners, gray)
+        val paperScore = paperInteriorScore(signals)
+        val rectangularity = rightAngleScore(corners)
+        val smallPenalty = smallCandidatePenalty(areaRatio, pageSide)
+        val linePenalty = internalLinePenalty(
+            contrast,
+            borderProximity,
+            smallPenalty,
+            validation.outsideContentContinuation,
+        )
+        if (areaRatio < 0.24 || linePenalty >= 0.82) return null
+        val anchorContinuity = (
+            outer.support * 0.42 +
+                top.support * 0.27 +
+                bottom.support * 0.27 +
                 spine.support * 0.04
+            ).coerceIn(0.0, 1.0)
         val score =
-            0.38 +
-                anchorScore +
-                envelopeContainment * 0.14 +
-                validation.outerBoundaryContinuity * 0.06 -
-                validation.outsideContentContinuation * 0.12
+            occupancy * 0.24 +
+                borderProximity * 0.17 +
+                contrast * 0.11 +
+                paperScore * 0.13 +
+                rectangularity * 0.06 +
+                anchorContinuity * 0.14 +
+                envelopeContainment * 0.08 +
+                outer.support * 0.07 -
+                linePenalty * 0.28 -
+                smallPenalty * 0.22
+        val baseConfidence = candidateConfidence(
+            occupancy,
+            borderProximity,
+            contrast,
+            paperScore,
+            rectangularity,
+            anchorContinuity,
+            linePenalty,
+            smallPenalty,
+        )
+        val outerEvidence = (outer.support / 0.16).coerceIn(0.0, 1.0)
+        val confidence = max(
+            baseConfidence,
+            (baseConfidence * 0.78 + outerEvidence * 0.22).coerceIn(0.0, 1.0),
+        )
         return Candidate(
             points = corners,
             contourPoints = corners,
             score = score,
+            confidence = confidence,
             kind = CandidateKind.bookPage,
             spineSide = pageSide.spineSide,
             clippingEvidence = validation.clippingEvidence,
             debugScores = CandidateDebugScores(
-                area = areaRatio,
+                occupancy = occupancy,
+                borderProximity = borderProximity,
+                insideOutsideContrast = contrast,
+                paperScore = paperScore,
+                rectangularity = rectangularity,
+                edgeContinuity = anchorContinuity,
                 contentContainment = envelopeContainment,
-                outerContinuity = validation.outerBoundaryContinuity,
-                topContinuity = validation.topContinuity,
-                bottomContinuity = validation.bottomContinuity,
-                internalLinePenalty = validation.outsideContentContinuation,
-                spineScore = spine.support,
-                sidePolicy = outer.support,
+                internalLinePenalty = linePenalty,
+                smallCandidatePenalty = smallPenalty,
+                outsideContinuationPenalty = validation.outsideContentContinuation,
+                widthRatio = (ownedEnd - ownedStart) / width,
+                heightRatio = (bottom.coordinate - top.coordinate) / height,
+                areaRatio = areaRatio,
             ),
         )
     }
@@ -1209,6 +1559,7 @@ object OpenCvDocumentDetector {
         xRange: Pair<Double, Double>,
         yRange: Pair<Double, Double>,
         target: Double,
+        insideDirection: Int,
     ): BoundaryAnchor {
         val width = edges.cols()
         val height = edges.rows()
@@ -1232,10 +1583,17 @@ object OpenCvDocumentDetector {
             if (samples == 0) continue
             val support = edgeHits.toDouble() / samples * 0.75 +
                 (gradient / samples).coerceIn(0.0, 1.0) * 0.25
+            val contrast = verticalBoundaryContrast(
+                gray,
+                x,
+                yStart,
+                yEnd,
+                insideDirection,
+            )
             val positionPrior =
                 (1.0 - abs(x.toDouble() / width - target) /
                     max(0.01, xRange.second - xRange.first)).coerceIn(0.0, 1.0)
-            val selectionScore = support * 0.86 + positionPrior * 0.14
+            val selectionScore = support * 0.50 + contrast * 0.30 + positionPrior * 0.20
             if (selectionScore > best.selectionScore) {
                 best = BoundaryAnchor(x.toDouble(), support, selectionScore)
             }
@@ -1249,6 +1607,7 @@ object OpenCvDocumentDetector {
         yRange: Pair<Double, Double>,
         xRange: Pair<Double, Double>,
         target: Double,
+        insideDirection: Int,
     ): BoundaryAnchor {
         val width = edges.cols()
         val height = edges.rows()
@@ -1272,15 +1631,64 @@ object OpenCvDocumentDetector {
             if (samples == 0) continue
             val support = edgeHits.toDouble() / samples * 0.75 +
                 (gradient / samples).coerceIn(0.0, 1.0) * 0.25
+            val contrast = horizontalBoundaryContrast(
+                gray,
+                y,
+                xStart,
+                xEnd,
+                insideDirection,
+            )
             val positionPrior =
                 (1.0 - abs(y.toDouble() / height - target) /
                     max(0.01, yRange.second - yRange.first)).coerceIn(0.0, 1.0)
-            val selectionScore = support * 0.86 + positionPrior * 0.14
+            val selectionScore = support * 0.50 + contrast * 0.30 + positionPrior * 0.20
             if (selectionScore > best.selectionScore) {
                 best = BoundaryAnchor(y.toDouble(), support, selectionScore)
             }
         }
         return best
+    }
+
+    private fun verticalBoundaryContrast(
+        gray: Mat,
+        x: Int,
+        yStart: Int,
+        yEnd: Int,
+        insideDirection: Int,
+    ): Double {
+        val offset = max(2, (gray.cols() * 0.012).roundToInt())
+        val insideX = (x + insideDirection * offset).coerceIn(0, gray.cols() - 1)
+        val outsideX = (x - insideDirection * offset).coerceIn(0, gray.cols() - 1)
+        val step = max(1, (yEnd - yStart) / 96)
+        val differences = mutableListOf<Double>()
+        for (y in yStart until yEnd step step) {
+            val inside = gray.get(y, insideX)?.firstOrNull() ?: continue
+            val outside = gray.get(y, outsideX)?.firstOrNull() ?: continue
+            differences.add(abs(inside - outside) / 255.0)
+        }
+        return if (differences.isEmpty()) 0.0 else
+            (differences.average() * 3.2).coerceIn(0.0, 1.0)
+    }
+
+    private fun horizontalBoundaryContrast(
+        gray: Mat,
+        y: Int,
+        xStart: Int,
+        xEnd: Int,
+        insideDirection: Int,
+    ): Double {
+        val offset = max(2, (gray.rows() * 0.012).roundToInt())
+        val insideY = (y + insideDirection * offset).coerceIn(0, gray.rows() - 1)
+        val outsideY = (y - insideDirection * offset).coerceIn(0, gray.rows() - 1)
+        val step = max(1, (xEnd - xStart) / 120)
+        val differences = mutableListOf<Double>()
+        for (x in xStart until xEnd step step) {
+            val inside = gray.get(insideY, x)?.firstOrNull() ?: continue
+            val outside = gray.get(outsideY, x)?.firstOrNull() ?: continue
+            differences.add(abs(inside - outside) / 255.0)
+        }
+        return if (differences.isEmpty()) 0.0 else
+            (differences.average() * 3.2).coerceIn(0.0, 1.0)
     }
 
     private fun overlapExpansionPenalty(
@@ -1589,6 +1997,7 @@ object OpenCvDocumentDetector {
         val points: Array<Point>,
         val contourPoints: Array<Point>,
         val score: Double,
+        val confidence: Double,
         val kind: CandidateKind,
         val spineSide: SpineSide?,
         val clippingEvidence: Double,
@@ -1612,6 +2021,8 @@ object OpenCvDocumentDetector {
     private data class RegionSignals(
         val textDensity: Double,
         val brightnessConsistency: Double,
+        val meanBrightness: Double,
+        val brightPixelRatio: Double,
     )
 
     private data class BandSignals(
@@ -1643,14 +2054,19 @@ object OpenCvDocumentDetector {
     }
 
     private data class CandidateDebugScores(
-        val area: Double = 0.0,
+        val occupancy: Double = 0.0,
+        val borderProximity: Double = 0.0,
+        val insideOutsideContrast: Double = 0.0,
+        val paperScore: Double = 0.0,
+        val rectangularity: Double = 0.0,
+        val edgeContinuity: Double = 0.0,
         val contentContainment: Double = 1.0,
-        val outerContinuity: Double = 1.0,
-        val topContinuity: Double = 0.0,
-        val bottomContinuity: Double = 0.0,
         val internalLinePenalty: Double = 0.0,
-        val spineScore: Double = 0.0,
-        val sidePolicy: Double = 0.0,
+        val smallCandidatePenalty: Double = 0.0,
+        val outsideContinuationPenalty: Double = 0.0,
+        val widthRatio: Double = 0.0,
+        val heightRatio: Double = 0.0,
+        val areaRatio: Double = 0.0,
     )
 
     private enum class CandidateKind { document, bookPage, openBookSpread }
@@ -1671,24 +2087,49 @@ object OpenCvDocumentDetector {
         }
     }
 
-    private fun logCandidate(
-        candidate: Candidate,
+    private fun logCandidates(
+        candidates: List<Candidate>,
         pageSide: PageSide?,
         debugLogging: Boolean,
+        selected: Candidate?,
     ) {
         if (!debugLogging) return
-        val scores = candidate.debugScores
         Log.d(
             "ScanaDetector",
-            "candidate area=${scores.area} " +
-                "contentContainment=${scores.contentContainment} " +
-                "outerContinuity=${scores.outerContinuity} " +
-                "topContinuity=${scores.topContinuity} " +
-                "bottomContinuity=${scores.bottomContinuity} " +
-                "internalLinePenalty=${scores.internalLinePenalty} " +
-                "spineScore=${scores.spineScore} " +
-                "pageSide=${pageSide?.value ?: "single"} " +
-                "sidePolicy=${scores.sidePolicy} finalScore=${candidate.score}",
+            "mode=${if (pageSide == null) "single" else "spread"} " +
+                "roi=${pageSide?.value ?: "full"} candidate_count=${candidates.size} " +
+                "selected_candidate_index=${selected?.let { candidates.indexOf(it) } ?: -1} " +
+                "selected_by=${if (selected == null) "fallback" else "highRes"} " +
+                "fallback_used=${selected == null} " +
+                "fallback_reason=${if (selected == null) "no_reliable_candidate" else "none"}",
         )
+        candidates.sortedByDescending { it.score }.take(3).forEachIndexed { index, candidate ->
+            val scores = candidate.debugScores
+            Log.d(
+                "ScanaDetector",
+                "rank=${index + 1} occupancy=${scores.occupancy} " +
+                    "border_proximity=${scores.borderProximity} " +
+                    "inside_outside_contrast=${scores.insideOutsideContrast} " +
+                    "paper_score=${scores.paperScore} " +
+                    "rectangularity=${scores.rectangularity} " +
+                    "edge_continuity=${scores.edgeContinuity} " +
+                    "content_containment=${scores.contentContainment} " +
+                    "internal_line_penalty=${scores.internalLinePenalty} " +
+                    "small_candidate_penalty=${scores.smallCandidatePenalty} " +
+                    "outside_continuation_penalty=${scores.outsideContinuationPenalty} " +
+                    "area_ratio=${scores.areaRatio} width_ratio=${scores.widthRatio} " +
+                    "height_ratio=${scores.heightRatio} " +
+                    "final_score=${candidate.score} confidence=${candidate.confidence}",
+            )
+        }
+        selected?.let { candidate ->
+            val corners = orderCorners(candidate.points)
+            Log.d(
+                "ScanaDetector",
+                "selected_corners topLeft=${pointMap(corners[0])} " +
+                    "topRight=${pointMap(corners[1])} " +
+                    "bottomRight=${pointMap(corners[2])} bottomLeft=${pointMap(corners[3])}",
+            )
+        }
     }
 }

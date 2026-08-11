@@ -92,7 +92,16 @@ abstract interface class PreviewDocumentDetector {
   Future<DocumentDetectionResult> detect(PreviewLuminanceFrame frame);
 }
 
-class OpenCvPreviewDocumentDetector implements PreviewDocumentDetector {
+abstract interface class SpreadPreviewDocumentDetector
+    implements PreviewDocumentDetector {
+  Future<DocumentDetectionResult> detectForPage(
+    PreviewLuminanceFrame frame, {
+    required DocumentPageSide pageSide,
+    required int sensorOrientation,
+  });
+}
+
+class OpenCvPreviewDocumentDetector implements SpreadPreviewDocumentDetector {
   const OpenCvPreviewDocumentDetector({MethodChannel? channel})
     : _channel =
           channel ?? const MethodChannel('com.myphotw.scana/document_detector');
@@ -101,13 +110,35 @@ class OpenCvPreviewDocumentDetector implements PreviewDocumentDetector {
 
   @override
   Future<DocumentDetectionResult> detect(PreviewLuminanceFrame frame) async {
-    final value = await _channel
-        .invokeMapMethod<String, dynamic>('detectPreviewFrame', {
-          'bytes': frame.bytes,
-          'width': frame.width,
-          'height': frame.height,
-          'rowStride': frame.rowStride,
-        });
+    return _detect(frame);
+  }
+
+  @override
+  Future<DocumentDetectionResult> detectForPage(
+    PreviewLuminanceFrame frame, {
+    required DocumentPageSide pageSide,
+    required int sensorOrientation,
+  }) =>
+      _detect(frame, pageSide: pageSide, sensorOrientation: sensorOrientation);
+
+  Future<DocumentDetectionResult> _detect(
+    PreviewLuminanceFrame frame, {
+    DocumentPageSide? pageSide,
+    int? sensorOrientation,
+  }) async {
+    final value = await _channel.invokeMapMethod<String, dynamic>(
+      'detectPreviewFrame',
+      {
+        'bytes': frame.bytes,
+        'width': frame.width,
+        'height': frame.height,
+        'rowStride': frame.rowStride,
+        ...?(pageSide == null ? null : {'pageSide': pageSide.name}),
+        ...?(sensorOrientation == null
+            ? null
+            : {'sensorOrientation': sensorOrientation}),
+      },
+    );
     if (value == null) {
       throw const FormatException('Preview detector returned no result.');
     }
@@ -538,8 +569,16 @@ class LiveDocumentDetectionController extends ChangeNotifier {
   final Duration analysisInterval;
   bool _isAnalyzing = false;
   DateTime? _lastAnalysisStarted;
+  bool _lastDetected = false;
+  double _lastConfidence = 0;
+  int _lastFrameWidth = 0;
+  int _lastFrameHeight = 0;
 
   bool get isAnalyzing => _isAnalyzing;
+  bool get lastDetected => _lastDetected;
+  double get lastConfidence => _lastConfidence;
+  int get lastFrameWidth => _lastFrameWidth;
+  int get lastFrameHeight => _lastFrameHeight;
   bool get canAccept {
     final last = _lastAnalysisStarted;
     return !_isAnalyzing &&
@@ -563,11 +602,17 @@ class LiveDocumentDetectionController extends ChangeNotifier {
     }
     _isAnalyzing = true;
     _lastAnalysisStarted = now;
+    _lastFrameWidth = frame.width;
+    _lastFrameHeight = frame.height;
     try {
       final result = await detector.detect(frame);
+      _lastDetected = result.detected;
+      _lastConfidence = result.confidence;
       _boundaryStabilizer.update(result, clock());
       notifyListeners();
     } on Object {
+      _lastDetected = false;
+      _lastConfidence = 0;
       _boundaryStabilizer.miss(clock());
       notifyListeners();
     } finally {
@@ -578,6 +623,8 @@ class LiveDocumentDetectionController extends ChangeNotifier {
 
   void reset() {
     _boundaryStabilizer.reset();
+    _lastDetected = false;
+    _lastConfidence = 0;
     notifyListeners();
   }
 }

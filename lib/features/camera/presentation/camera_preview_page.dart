@@ -15,6 +15,7 @@ import 'package:scana/models/document_detection_result.dart';
 import 'package:scana/models/page_boundary.dart';
 import 'package:scana/models/scan_capture_mode.dart';
 import 'package:scana/services/camera/camera_session.dart';
+import 'package:scana/services/image_processing/document_detector.dart';
 import 'package:scana/services/image_processing/live_document_detection.dart';
 import 'package:scana/services/diagnostics/debug_diagnostics.dart';
 import 'package:scana/services/orientation/screen_orientation_controller.dart';
@@ -45,7 +46,13 @@ class CameraPreviewPage extends StatefulWidget {
 class _CameraPreviewPageState extends State<CameraPreviewPage> {
   bool _isCapturing = false;
   bool _recoveryPromptShown = false;
+  late final PreviewDocumentDetector _previewDetector;
+  late final SpreadPreviewDocumentDetector? _spreadPreviewDetector;
   late final LiveDocumentDetectionController _liveDetection;
+  late final LiveDocumentDetectionController _leftLiveDetection;
+  late final LiveDocumentDetectionController _rightLiveDetection;
+  DateTime? _lastBoundaryLogAt;
+  String? _lastBoundaryLogState;
 
   @override
   void initState() {
@@ -54,10 +61,30 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
       'CameraPreviewPage.initState',
       mounted: mounted,
     );
+    _previewDetector =
+        widget.previewDocumentDetector ?? const OpenCvPreviewDocumentDetector();
+    _spreadPreviewDetector = _previewDetector is SpreadPreviewDocumentDetector
+        ? _previewDetector
+        : null;
     _liveDetection = LiveDocumentDetectionController(
-      detector:
-          widget.previewDocumentDetector ??
-          const OpenCvPreviewDocumentDetector(),
+      detector: _previewDetector,
+      boundaryStabilizer: PageBoundaryStabilizer(minimumConfidence: 0.22),
+    );
+    _leftLiveDetection = LiveDocumentDetectionController(
+      detector: _SpreadPreviewDetectorAdapter(
+        detector: _spreadPreviewDetector,
+        pageSide: DocumentPageSide.left,
+        previewRotation: _previewRotation,
+      ),
+      boundaryStabilizer: PageBoundaryStabilizer(minimumConfidence: 0.22),
+    );
+    _rightLiveDetection = LiveDocumentDetectionController(
+      detector: _SpreadPreviewDetectorAdapter(
+        detector: _spreadPreviewDetector,
+        pageSide: DocumentPageSide.right,
+        previewRotation: _previewRotation,
+      ),
+      boundaryStabilizer: PageBoundaryStabilizer(minimumConfidence: 0.22),
     );
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await _applyCaptureOrientation(widget.sessionManager.captureMode);
@@ -70,29 +97,98 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
 
   Future<void> _startPreviewAnalysis() async {
     final camera = widget.cameraStartup?.session;
-    if (camera == null ||
-        !mounted ||
-        widget.sessionManager.captureMode == ScanCaptureMode.spread) {
+    if (camera == null || !mounted) {
       return;
     }
     try {
       await camera.startPreviewAnalysis((image) {
-        if (!_liveDetection.canAccept || image.planes.isEmpty) return;
+        if (image.planes.isEmpty) return;
         final plane = image.planes.first;
-        unawaited(
-          _liveDetection.submit(
-            PreviewLuminanceFrame(
-              bytes: Uint8List.fromList(plane.bytes),
-              width: image.width,
-              height: image.height,
-              rowStride: plane.bytesPerRow,
-            ),
-          ),
+        final frame = PreviewLuminanceFrame(
+          bytes: Uint8List.fromList(plane.bytes),
+          width: image.width,
+          height: image.height,
+          rowStride: plane.bytesPerRow,
         );
+        if (widget.sessionManager.captureMode == ScanCaptureMode.spread) {
+          if (_spreadPreviewDetector == null) return;
+          if (_leftLiveDetection.canAccept) {
+            unawaited(_submitPreview(_leftLiveDetection, frame));
+          }
+          if (_rightLiveDetection.canAccept) {
+            unawaited(_submitPreview(_rightLiveDetection, frame));
+          }
+        } else if (_liveDetection.canAccept) {
+          unawaited(_submitPreview(_liveDetection, frame));
+        }
       });
     } on CameraException {
       // Optional live guidance must never block still capture.
     }
+  }
+
+  int _previewRotation() {
+    final controller = widget.cameraStartup?.session?.controller;
+    if (controller == null) return 0;
+    return CameraPreviewBoundaryTransform.rotationDegrees(
+      sensorOrientation: controller.description.sensorOrientation,
+      deviceOrientation: controller.value.deviceOrientation,
+      isFrontFacing:
+          controller.description.lensDirection == CameraLensDirection.front,
+    );
+  }
+
+  Future<void> _submitPreview(
+    LiveDocumentDetectionController controller,
+    PreviewLuminanceFrame frame,
+  ) async {
+    await controller.submit(frame);
+    if (!mounted) return;
+    _logLiveBoundary();
+  }
+
+  void _logLiveBoundary() {
+    if (!kDebugMode) return;
+    final mode = widget.sessionManager.captureMode;
+    final controllers = mode == ScanCaptureMode.single
+        ? [_liveDetection]
+        : [_leftLiveDetection, _rightLiveDetection];
+    String state(LiveDocumentDetectionController value) {
+      final boundary = value.visibleNormalizedBoundary;
+      return '${value.lastDetected}:${value.hasStableDocument}:'
+          '${boundary?.closedPolygon.length ?? 0}';
+    }
+
+    final stateKey = '${mode.name}:${controllers.map(state).join('|')}';
+    final now = DateTime.now();
+    if (_lastBoundaryLogState == stateKey &&
+        _lastBoundaryLogAt != null &&
+        now.difference(_lastBoundaryLogAt!) < const Duration(seconds: 1)) {
+      return;
+    }
+    _lastBoundaryLogState = stateKey;
+    _lastBoundaryLogAt = now;
+    String summary(String label, LiveDocumentDetectionController value) {
+      final boundary = value.visibleNormalizedBoundary;
+      final bounds = CameraPreviewBoundaryTransform.normalizedBounds(boundary);
+      return '${label}Detected=${value.lastDetected} '
+          '${label}Confidence=${value.lastConfidence.toStringAsFixed(3)} '
+          '${label}Stable=${value.hasStableDocument} '
+          '${label}BoundaryPoints=${boundary?.closedPolygon.length ?? 0} '
+          '${label}MinX=${bounds?.left.toStringAsFixed(3) ?? "n/a"} '
+          '${label}MaxX=${bounds?.right.toStringAsFixed(3) ?? "n/a"} '
+          '${label}MinY=${bounds?.top.toStringAsFixed(3) ?? "n/a"} '
+          '${label}MaxY=${bounds?.bottom.toStringAsFixed(3) ?? "n/a"}';
+    }
+
+    final first = controllers.first;
+    DebugDiagnostics.instance.log(
+      'LIVE_BOUNDARY',
+      'mode=${mode.name} frameWidth=${first.lastFrameWidth} '
+          'frameHeight=${first.lastFrameHeight} '
+          '${summary(mode == ScanCaptureMode.spread ? 'left' : '', first)} '
+          '${mode == ScanCaptureMode.spread ? summary('right', controllers.last) : ''}',
+    );
   }
 
   Future<void> _stopPreviewAnalysis() async {
@@ -242,10 +338,10 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
     await _stopPreviewAnalysis();
     await widget.sessionManager.setCaptureMode(mode);
     _liveDetection.reset();
+    _leftLiveDetection.reset();
+    _rightLiveDetection.reset();
     await _applyCaptureOrientation(mode);
-    if (mode == ScanCaptureMode.single) {
-      unawaited(_startPreviewAnalysis());
-    }
+    unawaited(_startPreviewAnalysis());
     if (mounted) setState(() {});
   }
 
@@ -277,17 +373,29 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          CameraPreview(cameraSession.controller),
-          AnimatedBuilder(
-            animation: _liveDetection,
-            builder: (context, child) => _ScanGuideOverlay(
-              boundary:
-                  widget.sessionManager.captureMode == ScanCaptureMode.spread
-                  ? null
-                  : _liveDetection.visibleNormalizedBoundary,
-              isStable: _liveDetection.hasStableDocument,
-              sensorOrientation:
-                  cameraSession.controller.description.sensorOrientation,
+          CameraPreview(
+            cameraSession.controller,
+            child: AnimatedBuilder(
+              animation: Listenable.merge([
+                _liveDetection,
+                _leftLiveDetection,
+                _rightLiveDetection,
+              ]),
+              builder: (context, child) => _ScanGuideOverlay(
+                boundary: captureMode == ScanCaptureMode.single
+                    ? _liveDetection.visibleNormalizedBoundary
+                    : null,
+                isStable: _liveDetection.hasStableDocument,
+                leftBoundary: captureMode == ScanCaptureMode.spread
+                    ? _leftLiveDetection.visibleNormalizedBoundary
+                    : null,
+                leftStable: _leftLiveDetection.hasStableDocument,
+                rightBoundary: captureMode == ScanCaptureMode.spread
+                    ? _rightLiveDetection.visibleNormalizedBoundary
+                    : null,
+                rightStable: _rightLiveDetection.hasStableDocument,
+                previewRotationDegrees: _previewRotation(),
+              ),
             ),
           ),
           SafeArea(
@@ -457,7 +565,32 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
     );
     unawaited(_stopPreviewAnalysis());
     _liveDetection.dispose();
+    _leftLiveDetection.dispose();
+    _rightLiveDetection.dispose();
     super.dispose();
+  }
+}
+
+class _SpreadPreviewDetectorAdapter implements PreviewDocumentDetector {
+  const _SpreadPreviewDetectorAdapter({
+    required this.detector,
+    required this.pageSide,
+    required this.previewRotation,
+  });
+  final SpreadPreviewDocumentDetector? detector;
+  final DocumentPageSide pageSide;
+  final int Function() previewRotation;
+  @override
+  Future<DocumentDetectionResult> detect(PreviewLuminanceFrame frame) {
+    final source = detector;
+    if (source == null) {
+      return Future.error(StateError('Spread preview is unavailable.'));
+    }
+    return source.detectForPage(
+      frame,
+      pageSide: pageSide,
+      sensorOrientation: previewRotation(),
+    );
   }
 }
 
@@ -465,43 +598,34 @@ class _ScanGuideOverlay extends StatelessWidget {
   const _ScanGuideOverlay({
     required this.boundary,
     required this.isStable,
-    required this.sensorOrientation,
+    required this.previewRotationDegrees,
+    this.leftBoundary,
+    this.leftStable = false,
+    this.rightBoundary,
+    this.rightStable = false,
   });
 
   final PageBoundary? boundary;
   final bool isStable;
-  final int sensorOrientation;
+  final int previewRotationDegrees;
+  final PageBoundary? leftBoundary;
+  final bool leftStable;
+  final PageBoundary? rightBoundary;
+  final bool rightStable;
 
   @override
   Widget build(BuildContext context) {
     return IgnorePointer(
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          CustomPaint(
-            painter: _ScanGuidePainter(
-              boundary: boundary,
-              isStable: isStable,
-              sensorOrientation: sensorOrientation,
-            ),
-          ),
-          Align(
-            alignment: Alignment(0, 0.68),
-            child: DecoratedBox(
-              decoration: const BoxDecoration(color: Colors.black54),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 8,
-                ),
-                child: Text(
-                  BoundaryQualityAssessment.evaluate(boundary).message,
-                  style: const TextStyle(color: Colors.white),
-                ),
-              ),
-            ),
-          ),
-        ],
+      child: CustomPaint(
+        painter: _ScanGuidePainter(
+          boundary: boundary,
+          isStable: isStable,
+          leftBoundary: leftBoundary,
+          leftStable: leftStable,
+          rightBoundary: rightBoundary,
+          rightStable: rightStable,
+          previewRotationDegrees: previewRotationDegrees,
+        ),
       ),
     );
   }
@@ -603,19 +727,34 @@ class _ScanGuidePainter extends CustomPainter {
   const _ScanGuidePainter({
     required this.boundary,
     required this.isStable,
-    required this.sensorOrientation,
+    required this.previewRotationDegrees,
+    this.leftBoundary,
+    this.leftStable = false,
+    this.rightBoundary,
+    this.rightStable = false,
   });
 
   final PageBoundary? boundary;
   final bool isStable;
-  final int sensorOrientation;
+  final int previewRotationDegrees;
+  final PageBoundary? leftBoundary;
+  final bool leftStable;
+  final PageBoundary? rightBoundary;
+  final bool rightStable;
+  static DateTime? _lastPaintLogAt;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final detectedBoundary = boundary;
-    if (detectedBoundary != null) {
+    void draw(PageBoundary? detectedBoundary, bool stable, Color color) {
+      if (detectedBoundary == null) return;
       final points = detectedBoundary.closedPolygon
-          .map((point) => _previewPoint(point, size, sensorOrientation))
+          .map(
+            (point) => CameraPreviewBoundaryTransform.toPreviewPoint(
+              point,
+              size,
+              previewRotationDegrees,
+            ),
+          )
           .toList();
       final polygon = Path()..moveTo(points.first.dx, points.first.dy);
       for (final point in points.skip(1)) {
@@ -625,36 +764,113 @@ class _ScanGuidePainter extends CustomPainter {
       canvas.drawPath(
         polygon,
         Paint()
-          ..color = (isStable ? const Color(0xff4ade80) : Colors.white70)
-              .withValues(alpha: 0.12)
-          ..style = PaintingStyle.fill,
-      );
-      canvas.drawPath(
-        polygon,
-        Paint()
-          ..color = isStable ? const Color(0xff4ade80) : Colors.white70
+          ..color = (stable ? color : const Color(0xffffd54f)).withValues(
+            alpha: stable ? .98 : .76,
+          )
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 4
+          ..strokeWidth = stable ? 3.5 : 2.5
           ..strokeJoin = StrokeJoin.round,
       );
     }
-  }
 
-  static Offset _previewPoint(DocumentPoint point, Size size, int orientation) {
-    final normalized = switch (orientation) {
-      90 => Offset(1 - point.y, point.x),
-      180 => Offset(1 - point.x, 1 - point.y),
-      270 => Offset(point.y, 1 - point.x),
-      _ => Offset(point.x, point.y),
-    };
-    return Offset(normalized.dx * size.width, normalized.dy * size.height);
+    draw(boundary, isStable, const Color(0xff4ade80));
+    draw(leftBoundary, leftStable, const Color(0xff4ade80));
+    draw(rightBoundary, rightStable, const Color(0xff38bdf8));
+    if (kDebugMode) {
+      final now = DateTime.now();
+      if (_lastPaintLogAt == null ||
+          now.difference(_lastPaintLogAt!) >= const Duration(seconds: 1)) {
+        _lastPaintLogAt = now;
+        final source = [boundary, leftBoundary, rightBoundary]
+            .whereType<PageBoundary>()
+            .expand((value) => value.closedPolygon)
+            .map(
+              (point) => CameraPreviewBoundaryTransform.toPreviewPoint(
+                point,
+                size,
+                previewRotationDegrees,
+              ),
+            )
+            .toList();
+        final transformed = source.isEmpty
+            ? null
+            : Rect.fromLTRB(
+                source.map((point) => point.dx).reduce(math.min),
+                source.map((point) => point.dy).reduce(math.min),
+                source.map((point) => point.dx).reduce(math.max),
+                source.map((point) => point.dy).reduce(math.max),
+              );
+        DebugDiagnostics.instance.log(
+          'LIVE_BOUNDARY',
+          'previewWidth=${size.width.toStringAsFixed(1)} '
+              'previewHeight=${size.height.toStringAsFixed(1)} '
+              'overlayVisible=${source.isNotEmpty} '
+              'transformedMinX=${transformed?.left.toStringAsFixed(1) ?? "n/a"} '
+              'transformedMaxX=${transformed?.right.toStringAsFixed(1) ?? "n/a"} '
+              'transformedMinY=${transformed?.top.toStringAsFixed(1) ?? "n/a"} '
+              'transformedMaxY=${transformed?.bottom.toStringAsFixed(1) ?? "n/a"}',
+        );
+      }
+    }
   }
 
   @override
   bool shouldRepaint(covariant _ScanGuidePainter oldDelegate) =>
       oldDelegate.boundary != boundary ||
       oldDelegate.isStable != isStable ||
-      oldDelegate.sensorOrientation != sensorOrientation;
+      oldDelegate.leftBoundary != leftBoundary ||
+      oldDelegate.leftStable != leftStable ||
+      oldDelegate.rightBoundary != rightBoundary ||
+      oldDelegate.rightStable != rightStable ||
+      oldDelegate.previewRotationDegrees != previewRotationDegrees;
+}
+
+class CameraPreviewBoundaryTransform {
+  const CameraPreviewBoundaryTransform._();
+
+  static int rotationDegrees({
+    required int sensorOrientation,
+    required DeviceOrientation deviceOrientation,
+    required bool isFrontFacing,
+  }) {
+    final deviceDegrees = switch (deviceOrientation) {
+      DeviceOrientation.portraitUp => 0,
+      DeviceOrientation.landscapeLeft => 90,
+      DeviceOrientation.portraitDown => 180,
+      DeviceOrientation.landscapeRight => 270,
+    };
+    return isFrontFacing
+        ? (sensorOrientation + deviceDegrees) % 360
+        : (sensorOrientation - deviceDegrees + 360) % 360;
+  }
+
+  static Offset toPreviewPoint(
+    DocumentPoint point,
+    Size previewSize,
+    int rotationDegrees,
+  ) {
+    final normalized = switch (rotationDegrees) {
+      90 => Offset(1 - point.y, point.x),
+      180 => Offset(1 - point.x, 1 - point.y),
+      270 => Offset(point.y, 1 - point.x),
+      _ => Offset(point.x, point.y),
+    };
+    return Offset(
+      normalized.dx * previewSize.width,
+      normalized.dy * previewSize.height,
+    );
+  }
+
+  static Rect? normalizedBounds(PageBoundary? boundary) {
+    if (boundary == null || boundary.closedPolygon.isEmpty) return null;
+    final points = boundary.closedPolygon;
+    return Rect.fromLTRB(
+      points.map((point) => point.x).reduce(math.min),
+      points.map((point) => point.y).reduce(math.min),
+      points.map((point) => point.x).reduce(math.max),
+      points.map((point) => point.y).reduce(math.max),
+    );
+  }
 }
 
 class CameraBoundaryOverlayStyle {

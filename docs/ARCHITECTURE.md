@@ -1,5 +1,16 @@
 ﻿# 아키텍처
 
+## UX-Q1 표현 계층
+
+`LiveDocumentDetectionController`의 기존 throttle/stabilization 결과를 CameraPreview 내부에 그린다. Spread는 좌/우 ROI 요청을 별도로 사용한다. PDF Review의 임시 PDF 순서와 Grid 애니메이션은 분리하며, 앱 루트는 재개 시에도 non-immersive system bar 정책을 적용한다.
+
+## Q1.1 실기기 피드백 반영
+
+- Live boundary는 preview 전용 저신뢰 후보도 약하게 표시하고, sensor와 현재 device orientation을 조합한 회전으로 CameraPreview 실제 bounds에 투영한다.
+- PDF Review는 pointer 위치를 responsive Grid index로 바꿔 drag-hover 중 `_orderedPages`를 갱신한다. Drop에서는 두 번째 reorder를 수행하지 않는다.
+- 고해상도 crop은 page-sized geometry, paper/background transition, 반복 수평 internal-line evidence를 경쟁 후보 선택에 함께 사용한다. Stable-live fallback에도 geometry sanity gate를 적용한다.
+- DEBUG의 `LIVE_BOUNDARY`, `PAGE_DETECTION`, `PDF_REORDER` 항목으로 live/high-res/final crop source를 구분한다.
+
 ## 원칙
 
 기능은 모듈 단위로 분리하고, UI가 플랫폼 또는 이미지 처리 구현에 직접 의존하지 않도록 설계한다.
@@ -27,6 +38,16 @@
 - 후보는 사각형, convex, 최소 면적, 비정상 비율, 직각성, bounding rectangularity, 화면 가장자리 관계를 조합해 평가한다.
 - 결과 좌표는 원본 이미지 픽셀 좌표로 환산하며 순서는 top-left → top-right → bottom-right → bottom-left로 고정한다.
 - 실패는 정상 결과로 취급하고 Page Editor에서 기본 네 점을 수동 조정할 수 있다.
+
+### Q1 Book/Page Boundary Detection Quality Improvement
+
+- 실제 책과 악보에서는 Hough 직선, 오선, 표선, 내부 frame이 종이 외곽보다 강할 수 있으므로 직선 지지율은 보조 evidence로만 사용한다.
+- Single 후보는 ROI 점유율, 네 변의 border proximity, 경계 안/밖 luminance·local variance 차이, 밝은 종이 배경과 dark foreground 구조, rectangularity와 edge continuity를 함께 평가한다.
+- ROI 중앙의 작은 후보, 폭·높이가 ROI의 30% 미만인 후보, 종이 같은 영역 양쪽에 놓인 선, 외부로 콘텐츠가 이어지는 후보에는 internal-line/small-candidate penalty를 적용한다.
+- Spread의 10% overlap 분할 비율은 유지한다. 좌우 ROI는 독립적으로 평가하며 outer/top/bottom anchor가 충분하면 spine-side edge가 약해도 geometry 기반 후보를 유지한다.
+- Spread의 수평 anchor는 edge strength만으로 선택하지 않고 안/밖 대비와 ROI 상·하단 위치 prior를 함께 사용해 오선을 page edge로 선택하는 위험을 줄인다.
+- confidence는 순위 점수와 분리해 occupancy, paper interior, outside contrast, geometry, edge continuity와 penalty로 계산한다. 낮은 confidence 결과는 기존 stable-live/guide/보수적 ROI fallback보다 우선하지 않는다.
+- DEBUG 빌드는 mode, ROI side, candidate count와 상위 3개 후보의 세부 점수 및 confidence만 기록한다.
 
 ## 페이지 보정 계층
 

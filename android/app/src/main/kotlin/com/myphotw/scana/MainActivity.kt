@@ -63,12 +63,18 @@ class MainActivity : FlutterActivity() {
                             val width = call.argument<Int>("width")
                             val height = call.argument<Int>("height")
                             val rowStride = call.argument<Int>("rowStride")
+                            val pageSide = call.argument<String>("pageSide")
+                            val sensorOrientation = call.argument<Int>("sensorOrientation")
                             if (bytes == null || width == null || height == null || rowStride == null) {
                                 result.error("invalid_frame", "Preview frame is invalid.", null)
                                 return@setMethodCallHandler
                             }
                             runDetection(result) {
-                                OpenCvDocumentDetector.detectPreview(bytes, width, height, rowStride)
+                                if (pageSide == null || sensorOrientation == null) {
+                                    OpenCvDocumentDetector.detectPreview(bytes, width, height, rowStride)
+                                } else {
+                                    OpenCvDocumentDetector.detectPreviewForPage(bytes, width, height, rowStride, pageSide, sensorOrientation)
+                                }
                             }
                         }
                         "splitSpreadCapture" -> {

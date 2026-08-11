@@ -2,6 +2,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:scana/services/image_processing/spread_capture_splitter.dart';
 import 'package:scana/services/image_processing/document_detector.dart';
+import 'package:scana/models/document_geometry.dart';
+import 'package:scana/models/scan_page.dart';
 
 void main() {
   test('calculates overlap ROI geometry around the manual center guide', () {
@@ -45,5 +47,22 @@ void main() {
     expect(region.right, 1 - SpreadPageDetectionPolicy.outerMargin);
     expect(region.top, SpreadPageDetectionPolicy.verticalMargin);
     expect(region.bottom, 1 - SpreadPageDetectionPolicy.verticalMargin);
+  });
+
+  test('does not run Perspective for a low-confidence spread boundary', () {
+    final page = ScanPage(
+      pageNo: 1,
+      rawImagePath: 'right.jpg',
+      createdTime: DateTime(2026, 8, 11),
+      detectionConfidence: 0.54,
+      documentCorners: const DocumentCorners(
+        topLeft: DocumentPoint(10, 10),
+        topRight: DocumentPoint(90, 10),
+        bottomRight: DocumentPoint(90, 190),
+        bottomLeft: DocumentPoint(10, 190),
+      ),
+    );
+
+    expect(SpreadPageDetectionPolicy.isStableDetection(page), isFalse);
   });
 }

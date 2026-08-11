@@ -210,6 +210,15 @@ void main() {
       await tester.pump(const Duration(milliseconds: 500));
       await gesture.moveTo(tester.getCenter(thirdCard));
       await tester.pump();
+      await tester.pump(const Duration(milliseconds: 16));
+      final liveOrder = tester.widget<Semantics>(
+        find.byKey(const Key('pdfReviewOrder')),
+      );
+      expect(
+        liveOrder.properties.value,
+        '/raw_2.jpg|/raw_3.jpg|/raw_1.jpg',
+        reason: 'PDF order must change while the pointer is still down.',
+      );
       await gesture.up();
       await tester.pumpAndSettle();
 

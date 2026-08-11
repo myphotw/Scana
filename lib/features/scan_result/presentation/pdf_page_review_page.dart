@@ -50,6 +50,13 @@ class _PdfPageReviewPageState extends State<PdfPageReviewPage>
     with WidgetsBindingObserver {
   late List<ScanPage> _orderedPages;
   String? _draggingPath;
+  Map<String, int> _previousOrder = const {};
+  int _reorderRevision = 0;
+  final GlobalKey _gridLayoutKey = GlobalKey();
+  final ScrollController _gridScrollController = ScrollController();
+  int _gridColumns = 2;
+  double _gridTileWidth = 1;
+  double _gridTileHeight = 1;
   bool _exportFlowActive = false;
   bool _isExporting = false;
   PdfExportProgress? _exportProgress;
@@ -87,6 +94,7 @@ class _PdfPageReviewPageState extends State<PdfPageReviewPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _gridScrollController.dispose();
     DebugDiagnostics.instance.logState(
       'PdfPageReviewPage.dispose',
       mounted: mounted,
@@ -115,40 +123,95 @@ class _PdfPageReviewPageState extends State<PdfPageReviewPage>
         body: Stack(
           children: [
             LayoutBuilder(
-              builder: (context, constraints) => GridView.builder(
-                key: const Key('pdfPageReviewGrid'),
-                padding: const EdgeInsets.fromLTRB(12, 12, 12, 96),
-                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: PdfReviewGridLayout.columnCount(
-                    constraints.maxWidth,
+              builder: (context, constraints) {
+                final columns = PdfReviewGridLayout.columnCount(
+                  constraints.maxWidth,
+                );
+                final tileWidth =
+                    (constraints.maxWidth - 24 - (columns - 1) * 12) / columns;
+                final tileHeight = tileWidth / .72;
+                _gridColumns = columns;
+                _gridTileWidth = tileWidth;
+                _gridTileHeight = tileHeight;
+                return Semantics(
+                  key: const Key('pdfReviewOrder'),
+                  value: _orderedPages
+                      .map((page) => page.rawImagePath)
+                      .join('|'),
+                  child: KeyedSubtree(
+                    key: const Key('pdfPageReviewGrid'),
+                    child: GridView.builder(
+                      key: _gridLayoutKey,
+                      controller: _gridScrollController,
+                      padding: const EdgeInsets.fromLTRB(12, 12, 12, 96),
+                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: PdfReviewGridLayout.columnCount(
+                          constraints.maxWidth,
+                        ),
+                        crossAxisSpacing: 12,
+                        mainAxisSpacing: 12,
+                        childAspectRatio: 0.72,
+                      ),
+                      itemCount: _orderedPages.length,
+                      findChildIndexCallback: (key) {
+                        if (key is! ValueKey<String>) return null;
+                        return _orderedPages.indexWhere(
+                          (page) =>
+                              'pdf-review-motion-${page.rawImagePath}' ==
+                              key.value,
+                        );
+                      },
+                      itemBuilder: (context, index) {
+                        final page = _orderedPages[index];
+                        final columns = _gridColumns;
+                        final previousIndex = _previousOrder[page.rawImagePath];
+                        final tileWidth = _gridTileWidth;
+                        final tileHeight = _gridTileHeight;
+                        final from = previousIndex == null
+                            ? Offset.zero
+                            : Offset(
+                                ((previousIndex % columns) -
+                                        (index % columns)) *
+                                    (tileWidth + 12) /
+                                    tileWidth,
+                                ((previousIndex ~/ columns) -
+                                        (index ~/ columns)) *
+                                    (tileHeight + 12) /
+                                    tileHeight,
+                              );
+                        return _LiveReorderMotion(
+                          key: ValueKey(
+                            'pdf-review-motion-${page.rawImagePath}',
+                          ),
+                          from: from,
+                          revision: _reorderRevision,
+                          child: _ReviewDragTarget(
+                            key: ValueKey(
+                              'pdf-review-target-${page.rawImagePath}',
+                            ),
+                            page: page,
+                            pdfIndex: index,
+                            isDragging: _draggingPath == page.rawImagePath,
+                            onDragStarted: () {
+                              if (!mounted || _exportFlowActive) return;
+                              setState(() => _draggingPath = page.rawImagePath);
+                            },
+                            onDragEnded: () {
+                              if (!mounted) return;
+                              setState(() => _draggingPath = null);
+                            },
+                            onDragUpdate: _updateLiveReorder,
+                            onHover: (rawPath) =>
+                                _movePage(rawPath, page.rawImagePath),
+                            onAccept: (_) {},
+                            onTap: () => _openViewer(index),
+                          ),
+                        );
+                      },
+                    ),
                   ),
-                  crossAxisSpacing: 12,
-                  mainAxisSpacing: 12,
-                  childAspectRatio: 0.72,
-                ),
-                itemCount: _orderedPages.length,
-                itemBuilder: (context, index) => _ReviewDragTarget(
-                  key: ValueKey(
-                    'pdf-review-target-${_orderedPages[index].rawImagePath}',
-                  ),
-                  page: _orderedPages[index],
-                  pdfIndex: index,
-                  isDragging:
-                      _draggingPath == _orderedPages[index].rawImagePath,
-                  onDragStarted: () {
-                    if (!mounted || _exportFlowActive) return;
-                    setState(
-                      () => _draggingPath = _orderedPages[index].rawImagePath,
-                    );
-                  },
-                  onDragEnded: () {
-                    if (!mounted) return;
-                    setState(() => _draggingPath = null);
-                  },
-                  onAccept: (rawPath) => _movePage(rawPath, index),
-                  onTap: () => _openViewer(index),
-                ),
-              ),
+                );
+              },
             ),
             if (_isExporting)
               Positioned.fill(
@@ -212,16 +275,46 @@ class _PdfPageReviewPageState extends State<PdfPageReviewPage>
     return '날짜 기반 파일명을 사용합니다.';
   }
 
-  void _movePage(String rawPath, int targetIndex) {
+  void _movePage(String rawPath, String targetPath) {
     if (!_isDragging || _exportFlowActive) return;
     final oldIndex = _orderedPages.indexWhere(
       (page) => page.rawImagePath == rawPath,
     );
-    if (oldIndex < 0 || oldIndex == targetIndex) return;
+    final targetIndex = _orderedPages.indexWhere(
+      (page) => page.rawImagePath == targetPath,
+    );
+    if (oldIndex < 0 || targetIndex < 0 || oldIndex == targetIndex) return;
     setState(() {
+      _previousOrder = {
+        for (var index = 0; index < _orderedPages.length; index++)
+          _orderedPages[index].rawImagePath: index,
+      };
       final page = _orderedPages.removeAt(oldIndex);
       _orderedPages.insert(targetIndex.clamp(0, _orderedPages.length), page);
+      _reorderRevision++;
     });
+    DebugDiagnostics.instance.log(
+      'PDF_REORDER',
+      'live rawPath=$rawPath oldIndex=$oldIndex targetIndex=$targetIndex',
+    );
+  }
+
+  void _updateLiveReorder(DragUpdateDetails details) {
+    final renderObject = _gridLayoutKey.currentContext?.findRenderObject();
+    if (renderObject is! RenderBox || _draggingPath == null) return;
+    final local = renderObject.globalToLocal(details.globalPosition);
+    final contentX = local.dx - 12;
+    final contentY =
+        local.dy -
+        12 +
+        (_gridScrollController.hasClients ? _gridScrollController.offset : 0);
+    if (contentX < 0 || contentY < 0) return;
+    final column = (contentX / (_gridTileWidth + 12)).floor();
+    final row = (contentY / (_gridTileHeight + 12)).floor();
+    if (column < 0 || column >= _gridColumns || row < 0) return;
+    final targetIndex = row * _gridColumns + column;
+    if (targetIndex < 0 || targetIndex >= _orderedPages.length) return;
+    _movePage(_draggingPath!, _orderedPages[targetIndex].rawImagePath);
   }
 
   Future<void> _openViewer(int index) async {
@@ -528,6 +621,46 @@ class _PdfFileNameDialogState extends State<PdfFileNameDialog> {
 
 enum _PdfLocationChoice { useRecent, chooseAnother }
 
+class _LiveReorderMotion extends StatefulWidget {
+  const _LiveReorderMotion({
+    super.key,
+    required this.from,
+    required this.revision,
+    required this.child,
+  });
+
+  final Offset from;
+  final int revision;
+  final Widget child;
+
+  @override
+  State<_LiveReorderMotion> createState() => _LiveReorderMotionState();
+}
+
+class _LiveReorderMotionState extends State<_LiveReorderMotion> {
+  Offset _offset = Offset.zero;
+
+  @override
+  void didUpdateWidget(covariant _LiveReorderMotion oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.revision == widget.revision) return;
+    _offset = widget.from;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _offset != Offset.zero) {
+        setState(() => _offset = Offset.zero);
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedSlide(
+    offset: _offset,
+    duration: const Duration(milliseconds: 220),
+    curve: Curves.easeOutCubic,
+    child: widget.child,
+  );
+}
+
 class _ReviewDragTarget extends StatelessWidget {
   const _ReviewDragTarget({
     super.key,
@@ -536,6 +669,8 @@ class _ReviewDragTarget extends StatelessWidget {
     required this.isDragging,
     required this.onDragStarted,
     required this.onDragEnded,
+    required this.onDragUpdate,
+    required this.onHover,
     required this.onAccept,
     required this.onTap,
   });
@@ -545,13 +680,22 @@ class _ReviewDragTarget extends StatelessWidget {
   final bool isDragging;
   final VoidCallback onDragStarted;
   final VoidCallback onDragEnded;
+  final ValueChanged<DragUpdateDetails> onDragUpdate;
+  final ValueChanged<String> onHover;
   final ValueChanged<String> onAccept;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     return DragTarget<String>(
-      onWillAcceptWithDetails: (details) => details.data != page.rawImagePath,
+      onWillAcceptWithDetails: (details) {
+        if (details.data == page.rawImagePath) return false;
+        onHover(details.data);
+        return true;
+      },
+      onMove: (details) {
+        if (details.data != page.rawImagePath) onHover(details.data);
+      },
       onAcceptWithDetails: (details) => onAccept(details.data),
       builder: (context, candidates, rejected) {
         final highlighted = candidates.isNotEmpty;
@@ -560,23 +704,27 @@ class _ReviewDragTarget extends StatelessWidget {
           data: page.rawImagePath,
           delay: const Duration(milliseconds: 450),
           onDragStarted: onDragStarted,
+          onDragUpdate: onDragUpdate,
           onDragEnd: (_) => onDragEnded(),
-          feedback: Material(
-            color: Colors.transparent,
-            elevation: 10,
-            borderRadius: BorderRadius.circular(14),
-            child: SizedBox(
-              width: 180,
-              height: 250,
-              child: _ReviewCard(
-                page: page,
-                pdfIndex: pdfIndex,
-                elevated: true,
+          feedback: Transform.scale(
+            scale: 1.03,
+            child: Material(
+              color: Colors.transparent,
+              elevation: 12,
+              borderRadius: BorderRadius.circular(14),
+              child: SizedBox(
+                width: 180,
+                height: 250,
+                child: _ReviewCard(
+                  page: page,
+                  pdfIndex: pdfIndex,
+                  elevated: true,
+                ),
               ),
             ),
           ),
           childWhenDragging: Opacity(
-            opacity: 0.35,
+            opacity: 0,
             child: _ReviewCard(page: page, pdfIndex: pdfIndex),
           ),
           child: _ReviewCard(

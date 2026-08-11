@@ -1,13 +1,15 @@
 import 'dart:async';
-import 'dart:typed_data';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:scana/models/document_detection_result.dart';
 import 'package:scana/models/page_boundary.dart';
+import 'package:scana/services/image_processing/document_detector.dart';
 import 'package:scana/services/image_processing/live_document_detection.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   final frame = PreviewLuminanceFrame(
     bytes: Uint8List(0),
     width: 100,
@@ -107,7 +109,107 @@ void main() {
     expect(upright.right.first.y, closeTo(0.1, 0.0001));
     expect(upright.right.last.y, closeTo(0.9, 0.0001));
   });
+
+  test(
+    'detected unstable boundary stays visible before stabilization',
+    () async {
+      final controller = LiveDocumentDetectionController(
+        detector: _ImmediateDetector(_result(confidence: 0.3)),
+        boundaryStabilizer: PageBoundaryStabilizer(minimumConfidence: 0.22),
+        analysisInterval: Duration.zero,
+      );
+      addTearDown(controller.dispose);
+
+      await controller.submit(frame);
+
+      expect(controller.lastDetected, isTrue);
+      expect(controller.visibleNormalizedBoundary, isNotNull);
+      expect(controller.hasStableDocument, isFalse);
+    },
+  );
+
+  test('three matching boundaries become strongly stable', () async {
+    final controller = LiveDocumentDetectionController(
+      detector: _ImmediateDetector(_result(confidence: 0.7)),
+      boundaryStabilizer: PageBoundaryStabilizer(minimumConfidence: 0.22),
+      analysisInterval: Duration.zero,
+    );
+    addTearDown(controller.dispose);
+
+    await controller.submit(frame);
+    await controller.submit(frame);
+    await controller.submit(frame);
+
+    expect(controller.hasStableDocument, isTrue);
+    expect(controller.stableNormalizedBoundary, isNotNull);
+  });
+
+  test(
+    'spread preview sends side and rotation and keeps full-frame points',
+    () async {
+      const channel = MethodChannel('test/spread-preview');
+      MethodCall? call;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (value) async {
+            call = value;
+            return _nativeBoundaryResult();
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null),
+      );
+      const detector = OpenCvPreviewDocumentDetector(channel: channel);
+
+      final result = await detector.detectForPage(
+        frame,
+        pageSide: DocumentPageSide.right,
+        sensorOrientation: 180,
+      );
+
+      expect(call?.method, 'detectPreviewFrame');
+      expect((call?.arguments as Map)['pageSide'], 'right');
+      expect((call?.arguments as Map)['sensorOrientation'], 180);
+      expect(result.boundary!.top.first.x, 45);
+      expect(result.boundary!.sourceWidth, 100);
+    },
+  );
 }
+
+Map<String, Object> _nativeBoundaryResult() => {
+  'detected': true,
+  'confidence': 0.7,
+  'sourceWidth': 100,
+  'sourceHeight': 200,
+  'corners': [
+    {'x': 45.0, 'y': 20.0},
+    {'x': 95.0, 'y': 20.0},
+    {'x': 95.0, 'y': 180.0},
+    {'x': 45.0, 'y': 180.0},
+  ],
+  'boundary': {
+    'top': [
+      {'x': 45.0, 'y': 20.0},
+      {'x': 95.0, 'y': 20.0},
+    ],
+    'right': [
+      {'x': 95.0, 'y': 20.0},
+      {'x': 95.0, 'y': 180.0},
+    ],
+    'bottom': [
+      {'x': 95.0, 'y': 180.0},
+      {'x': 45.0, 'y': 180.0},
+    ],
+    'left': [
+      {'x': 45.0, 'y': 180.0},
+      {'x': 45.0, 'y': 20.0},
+    ],
+    'confidence': 0.7,
+    'stability': 0.0,
+    'sourceWidth': 100,
+    'sourceHeight': 200,
+    'timestamp': DateTime.utc(2026, 8, 11).millisecondsSinceEpoch,
+  },
+};
 
 DocumentDetectionResult _result({double left = 10, double confidence = 0.9}) {
   return DocumentDetectionResult(
@@ -133,4 +235,14 @@ class _CompletingDetector implements PreviewDocumentDetector {
     calls++;
     return completer.future;
   }
+}
+
+class _ImmediateDetector implements PreviewDocumentDetector {
+  _ImmediateDetector(this.result);
+
+  final DocumentDetectionResult result;
+
+  @override
+  Future<DocumentDetectionResult> detect(PreviewLuminanceFrame frame) async =>
+      result;
 }

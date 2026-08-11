@@ -34,7 +34,7 @@ class ScanaApp extends StatefulWidget {
   State<ScanaApp> createState() => _ScanaAppState();
 }
 
-class _ScanaAppState extends State<ScanaApp> {
+class _ScanaAppState extends State<ScanaApp> with WidgetsBindingObserver {
   late final ScanSessionManager _sessionManager;
   late final bool _ownsSessionManager;
   late final DebugNavigatorObserver _navigatorObserver;
@@ -42,6 +42,7 @@ class _ScanaAppState extends State<ScanaApp> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _sessionManager =
         widget.sessionManager ??
         ScanSessionManager(storage: AppPrivateSessionStorage());
@@ -49,12 +50,21 @@ class _ScanaAppState extends State<ScanaApp> {
         widget.sessionManager == null || widget.ownsInjectedSessionManager;
     _navigatorObserver = DebugNavigatorObserver();
     DebugDiagnostics.instance.logState('ScanaApp.initState', mounted: mounted);
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    _showSystemBars();
+  }
+
+  void _showSystemBars() =>
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _showSystemBars();
   }
 
   @override
   void dispose() {
     DebugDiagnostics.instance.logState('ScanaApp.dispose', mounted: mounted);
+    WidgetsBinding.instance.removeObserver(this);
     if (widget.ownsInjectedCameraSession) {
       unawaited(widget.cameraStartup?.session?.dispose());
     }

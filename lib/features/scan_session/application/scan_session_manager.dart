@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
@@ -747,15 +748,48 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
         detection.sourceWidth,
         detection.sourceHeight,
       );
-      final resolvedBoundary = _isReliableBoundary(detection)
+      final highResReliable =
+          _isReliableBoundary(detection) &&
+          _isSaneBoundary(detection.boundary, pageSide: pageSide);
+      final previewReliable = _isSaneBoundary(
+        previewBoundary,
+        pageSide: pageSide,
+      );
+      final resolvedBoundary = highResReliable
           ? detection.boundary
-          : previewBoundary;
+          : previewReliable
+          ? previewBoundary
+          : null;
       final resolvedCorners =
           resolvedBoundary?.toDocumentCorners() ??
-          (_isReliableDetection(detection) ? detection.corners : null) ??
-          previewCorners ??
+          (_isReliableDetection(detection) &&
+                  _isSaneCorners(
+                    detection.corners,
+                    detection.sourceWidth,
+                    detection.sourceHeight,
+                    pageSide: pageSide,
+                  )
+              ? detection.corners
+              : null) ??
+          (previewReliable ? previewCorners : null) ??
           session.pages[index].documentCorners ??
           guideCorners;
+      DebugDiagnostics.instance.log(
+        'PAGE_DETECTION',
+        'mode=${pageSide == null ? "single" : "spread"} '
+            'roiSide=${pageSide?.name ?? "full"} detected=${detection.detected} '
+            'confidence=${detection.confidence.toStringAsFixed(3)} '
+            'selectedBy=${highResReliable
+                ? "highRes"
+                : previewReliable
+                ? "stableLive"
+                : "fallback"} '
+            'fallbackUsed=${!highResReliable && !previewReliable} '
+            'fallbackReason=${!highResReliable && !previewReliable ? "boundary_sanity_or_confidence" : "none"} '
+            'liveBoundary=${_boundarySummary(previewBoundary)} '
+            'highResBoundary=${_boundarySummary(detection.boundary)} '
+            'finalCropBoundary=${_boundarySummary(resolvedBoundary)}',
+      );
       session.updateDetectionAt(
         index,
         detection,
@@ -930,5 +964,59 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
   ) {
     if (normalized == null || width <= 0 || height <= 0) return null;
     return normalized.scaleTo(width, height);
+  }
+
+  static bool _isSaneBoundary(
+    PageBoundary? boundary, {
+    DocumentPageSide? pageSide,
+  }) {
+    if (boundary == null || !boundary.isValid) return false;
+    final normalized = boundary.normalized();
+    final points = normalized.closedPolygon;
+    final minX = points.map((point) => point.x).reduce(math.min);
+    final maxX = points.map((point) => point.x).reduce(math.max);
+    final minY = points.map((point) => point.y).reduce(math.min);
+    final maxY = points.map((point) => point.y).reduce(math.max);
+    final width = maxX - minX;
+    final height = maxY - minY;
+    final area = _normalizedPolygonArea(points);
+    return width >= (pageSide == null ? 0.46 : 0.42) &&
+        height >= 0.48 &&
+        area >= (pageSide == null ? 0.24 : 0.22);
+  }
+
+  static bool _isSaneCorners(
+    DocumentCorners? corners,
+    int width,
+    int height, {
+    DocumentPageSide? pageSide,
+  }) {
+    if (corners == null || width <= 0 || height <= 0) return false;
+    return _isSaneBoundary(
+      PageBoundary.fromCorners(
+        corners,
+        sourceWidth: width,
+        sourceHeight: height,
+        confidence: 1,
+        timestamp: DateTime.fromMillisecondsSinceEpoch(0),
+      ),
+      pageSide: pageSide,
+    );
+  }
+
+  static double _normalizedPolygonArea(List<DocumentPoint> points) {
+    var sum = 0.0;
+    for (var index = 0; index < points.length; index++) {
+      final next = points[(index + 1) % points.length];
+      sum += points[index].x * next.y - next.x * points[index].y;
+    }
+    return sum.abs() / 2;
+  }
+
+  static String _boundarySummary(PageBoundary? boundary) {
+    if (boundary == null) return 'none';
+    final normalized = boundary.normalized();
+    final points = normalized.closedPolygon;
+    return 'points=${points.length},area=${_normalizedPolygonArea(points).toStringAsFixed(3)}';
   }
 }

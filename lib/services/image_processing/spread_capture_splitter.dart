@@ -46,7 +46,10 @@ class SpreadPageDetectionPolicy {
   static const double outerMargin = 0.03;
   static const double spineInset = 0.09;
   static const double verticalMargin = 0.04;
-  static const double minimumBoundaryConfidence = 0.42;
+  // Must match ScanSessionManager's high-resolution reliability gate. A weak
+  // native result may leave guide corners on the page model and must not cause
+  // Perspective to run as if those corners were a detected boundary.
+  static const double minimumBoundaryConfidence = 0.55;
 
   static CaptureGuideRegion expectedRegion(DocumentPageSide side) {
     return switch (side) {

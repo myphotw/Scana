@@ -838,6 +838,46 @@ void main() {
     },
   );
 
+  test('rejects a narrow stable-live boundary before crop fallback', () async {
+    manager.close();
+    manager = ScanSessionManager(
+      storage: AppPrivateSessionStorage(
+        appPrivateDirectoryProvider: () async => testRoot,
+      ),
+      documentDetector: const _LowConfidenceDocumentDetector(),
+      sessionIdGenerator: () => 'narrow-live-session',
+    );
+    final capture = await _createCapture(testRoot, 'narrow-live.jpg');
+    final narrow = PageBoundary.fromCorners(
+      const DocumentCorners(
+        topLeft: DocumentPoint(0.4, 0.1),
+        topRight: DocumentPoint(0.6, 0.1),
+        bottomRight: DocumentPoint(0.6, 0.9),
+        bottomLeft: DocumentPoint(0.4, 0.9),
+      ),
+      sourceWidth: 1,
+      sourceHeight: 1,
+      confidence: 0.9,
+      stability: 1,
+      timestamp: DateTime.utc(2026, 8, 11),
+    );
+
+    final page = await manager.addRawCapture(
+      capture.path,
+      stablePreviewBoundary: narrow,
+      captureGuideRegion: const CaptureGuideRegion(
+        left: 0.2,
+        top: 0.2,
+        right: 0.8,
+        bottom: 0.8,
+      ),
+    );
+
+    expect(page.pageBoundary, isNull);
+    expect(page.documentCorners!.topLeft.x, 200);
+    expect(page.documentCorners!.topLeft.y, 300);
+  });
+
   test(
     'passes page boundary into curved correction with baseline fallback available',
     () async {
