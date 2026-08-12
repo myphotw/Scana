@@ -5,7 +5,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'package:scana/models/document_detection_result.dart';
+import 'package:scana/models/capture_boundary_snapshot.dart';
 import 'package:scana/models/page_boundary.dart';
+import 'package:scana/models/scan_capture_mode.dart';
 import 'package:scana/services/image_processing/document_detector.dart';
 
 class PreviewLuminanceFrame {
@@ -357,13 +359,18 @@ class PageBoundaryStabilizer {
                 confidence: result.confidence,
                 timestamp: now,
               ));
-    if (!result.detected ||
-        source == null ||
-        !source.isValid ||
-        result.confidence < minimumConfidence) {
+    if (!result.detected || source == null || !source.isValid) {
       return miss(now);
     }
     final normalized = _resample(source.normalized());
+    if (result.confidence < minimumConfidence) {
+      // A weak best candidate remains useful as live guidance, but it must not
+      // accumulate matches or become a capture-time stable boundary.
+      _candidate = normalized.copyWith(stability: 0, timestamp: now);
+      _candidateMatches = 0;
+      _expireIfNeeded(now);
+      return _stable;
+    }
     final stable = _stable;
     if (stable != null) {
       if (_isAbruptShrink(stable, normalized)) {
@@ -554,6 +561,65 @@ class PageBoundaryStabilizer {
   }
 }
 
+enum LiveGuideDisplayLevel { none, low, medium, stable }
+
+class LiveGuidePolicy {
+  const LiveGuidePolicy._();
+
+  static LiveGuideDisplayLevel levelFor({
+    required bool candidateAvailable,
+    required double confidence,
+    required bool stable,
+    bool captureSane = true,
+  }) {
+    if (!candidateAvailable) return LiveGuideDisplayLevel.none;
+    if (!captureSane) return LiveGuideDisplayLevel.low;
+    if (stable && confidence >= 0.45) return LiveGuideDisplayLevel.stable;
+    if (confidence >= 0.30) return LiveGuideDisplayLevel.medium;
+    return LiveGuideDisplayLevel.low;
+  }
+}
+
+class LiveCaptureBoundaryPolicy {
+  const LiveCaptureBoundaryPolicy._();
+
+  static bool isSane(
+    PageBoundary? boundary, {
+    CaptureBoundarySide side = CaptureBoundarySide.single,
+  }) {
+    if (boundary == null || !boundary.isValid) return false;
+    final normalized = boundary.normalized();
+    final points = normalized.closedPolygon;
+    if (points.any(
+      (point) =>
+          point.x < -0.03 ||
+          point.x > 1.03 ||
+          point.y < -0.03 ||
+          point.y > 1.03,
+    )) {
+      return false;
+    }
+    final xs = points.map((point) => point.x);
+    final ys = points.map((point) => point.y);
+    final width = xs.reduce(math.max) - xs.reduce(math.min);
+    final height = ys.reduce(math.max) - ys.reduce(math.min);
+    final area = _area(points);
+    final spread = side != CaptureBoundarySide.single;
+    return width >= (spread ? 0.48 : 0.52) &&
+        height >= 0.56 &&
+        area >= (spread ? 0.30 : 0.32);
+  }
+
+  static double _area(List<DocumentPoint> points) {
+    var sum = 0.0;
+    for (var index = 0; index < points.length; index++) {
+      final next = points[(index + 1) % points.length];
+      sum += points[index].x * next.y - next.x * points[index].y;
+    }
+    return sum.abs() / 2;
+  }
+}
+
 /// Throttles preview analysis and guarantees at most one native request.
 class LiveDocumentDetectionController extends ChangeNotifier {
   LiveDocumentDetectionController({
@@ -592,6 +658,53 @@ class LiveDocumentDetectionController extends ChangeNotifier {
       _boundaryStabilizer.visibleNormalizedBoundary;
   DocumentCorners? get stableNormalizedCorners =>
       stableNormalizedBoundary?.toDocumentCorners();
+  LiveGuideDisplayLevel get displayLevel =>
+      displayLevelFor(CaptureBoundarySide.single);
+
+  LiveGuideDisplayLevel displayLevelFor(CaptureBoundarySide side) =>
+      LiveGuidePolicy.levelFor(
+        candidateAvailable: visibleNormalizedBoundary != null,
+        confidence: _lastConfidence,
+        stable: hasStableDocument,
+        captureSane: LiveCaptureBoundaryPolicy.isSane(
+          visibleNormalizedBoundary,
+          side: side,
+        ),
+      );
+
+  CaptureBoundarySnapshot? freezeCaptureBoundary({
+    required ScanCaptureMode captureMode,
+    required CaptureBoundarySide side,
+    required int sensorOrientation,
+    required int deviceOrientationDegrees,
+    required int jpegRotationDegrees,
+    required bool mirrored,
+    DateTime? timestamp,
+  }) {
+    final boundary = visibleNormalizedBoundary;
+    if (boundary == null ||
+        _lastFrameWidth <= 0 ||
+        _lastFrameHeight <= 0 ||
+        displayLevelFor(side) == LiveGuideDisplayLevel.low ||
+        !LiveCaptureBoundaryPolicy.isSane(boundary, side: side)) {
+      return null;
+    }
+    final frozenBoundary = boundary.scaleTo(_lastFrameWidth, _lastFrameHeight);
+    return CaptureBoundarySnapshot(
+      captureMode: captureMode,
+      timestamp: timestamp ?? clock(),
+      sourceFrameWidth: _lastFrameWidth,
+      sourceFrameHeight: _lastFrameHeight,
+      sensorOrientation: sensorOrientation,
+      deviceOrientationDegrees: deviceOrientationDegrees,
+      jpegRotationDegrees: jpegRotationDegrees,
+      mirrored: mirrored,
+      boundary: frozenBoundary,
+      confidence: _lastConfidence,
+      stability: hasStableDocument ? 1 : boundary.stability,
+      side: side,
+    );
+  }
 
   Future<bool> submit(PreviewLuminanceFrame frame) async {
     final now = clock();

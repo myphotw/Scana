@@ -8,6 +8,7 @@ import android.os.Build
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import com.myphotw.scana.imageprocessing.OpenCvDocumentDetector
+import com.myphotw.scana.imageprocessing.FairScanDocumentSegmenter
 import com.myphotw.scana.imageprocessing.OpenCvPageCorrector
 import com.myphotw.scana.imageprocessing.OpenCvPageCorrector.CurvedCorrectionException
 import com.myphotw.scana.imageprocessing.OpenCvPageEnhancer
@@ -21,6 +22,8 @@ import java.io.File
 class MainActivity : FlutterActivity() {
     private val detectorExecutor = Executors.newSingleThreadExecutor()
     private var detectorChannel: MethodChannel? = null
+    private var aiSegmenterChannel: MethodChannel? = null
+    private var aiSegmenter: FairScanDocumentSegmenter? = null
     private var correctorChannel: MethodChannel? = null
     private var enhancerChannel: MethodChannel? = null
     private var ocrChannel: MethodChannel? = null
@@ -110,6 +113,49 @@ class MainActivity : FlutterActivity() {
                                     top,
                                     right,
                                     bottom,
+                                )
+                            }
+                        }
+                        else -> result.notImplemented()
+                    }
+                }
+            }
+        aiSegmenterChannel =
+            MethodChannel(
+                flutterEngine.dartExecutor.binaryMessenger,
+                AI_SEGMENTER_CHANNEL,
+            ).also { channel ->
+                channel.setMethodCallHandler { call, result ->
+                    when (call.method) {
+                        "getModelInfo" -> {
+                            runDetection(result) {
+                                aiSegmenter().modelInfo()
+                            }
+                        }
+                        "segmentDocument" -> {
+                            val imagePath = call.argument<String>("imagePath")
+                            val pageSide = call.argument<String>("pageSide")
+                            val debugOutputDirectory =
+                                call.argument<String>("debugOutputDirectory")
+                            val debugStem = call.argument<String>("debugStem") ?: "page"
+                            val openCvCorners =
+                                call.argument<List<Map<String, Number>>>("openCvCorners")
+                            if (imagePath.isNullOrBlank()) {
+                                result.error(
+                                    "invalid_ai_image_path",
+                                    "An AI segmentation image path is required.",
+                                    null,
+                                )
+                                return@setMethodCallHandler
+                            }
+                            runDetection(result) {
+                                aiSegmenter().segment(
+                                    imagePath = imagePath,
+                                    pageSide = pageSide,
+                                    debugArtifactsEnabled = isDebuggable,
+                                    debugOutputDirectory = debugOutputDirectory,
+                                    debugStem = debugStem,
+                                    openCvCorners = openCvCorners,
                                 )
                             }
                         }
@@ -505,6 +551,10 @@ class MainActivity : FlutterActivity() {
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
         detectorChannel?.setMethodCallHandler(null)
         detectorChannel = null
+        aiSegmenterChannel?.setMethodCallHandler(null)
+        aiSegmenterChannel = null
+        aiSegmenter?.close()
+        aiSegmenter = null
         correctorChannel?.setMethodCallHandler(null)
         correctorChannel = null
         enhancerChannel?.setMethodCallHandler(null)
@@ -571,6 +621,13 @@ class MainActivity : FlutterActivity() {
                     )
                 }
             }
+        }
+    }
+
+    @Synchronized
+    private fun aiSegmenter(): FairScanDocumentSegmenter {
+        return aiSegmenter ?: FairScanDocumentSegmenter(applicationContext).also {
+            aiSegmenter = it
         }
     }
 
@@ -743,6 +800,7 @@ class MainActivity : FlutterActivity() {
 
     private companion object {
         const val DOCUMENT_DETECTOR_CHANNEL = "com.myphotw.scana/document_detector"
+        const val AI_SEGMENTER_CHANNEL = "com.myphotw.scana/ai_document_segmenter"
         const val PAGE_CORRECTOR_CHANNEL = "com.myphotw.scana/page_corrector"
         const val PAGE_ENHANCER_CHANNEL = "com.myphotw.scana/page_enhancer"
         const val LOCAL_OCR_CHANNEL = "com.myphotw.scana/local_ocr"

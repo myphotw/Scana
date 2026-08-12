@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:scana/app.dart';
 import 'package:scana/features/page_editor/presentation/page_editor_page.dart';
+import 'package:scana/features/page_editor/presentation/quick_corner_edit_page.dart';
 import 'package:scana/features/camera/presentation/camera_preview_page.dart';
 import 'package:scana/features/scan_result/presentation/scan_result_viewer_page.dart';
 import 'package:scana/features/scan_result/presentation/page_management_page.dart';
@@ -16,6 +17,7 @@ import 'package:scana/models/scan_session.dart';
 import 'package:scana/models/page_correction.dart';
 import 'package:scana/models/scan_capture_mode.dart';
 import 'package:scana/models/page_enhancement.dart';
+import 'package:scana/models/ai_document_segmentation_result.dart';
 import 'package:scana/services/storage/scan_session_storage.dart';
 import 'package:scana/services/orientation/screen_orientation_controller.dart';
 
@@ -120,6 +122,30 @@ void main() {
     expect(find.text('0페이지 선택됨'), findsOneWidget);
   });
 
+  testWidgets('Gallery quick corner edit returns to the same Gallery', (
+    tester,
+  ) async {
+    final manager = _viewerManagerWithPages(1);
+    addTearDown(manager.close);
+    await tester.pumpWidget(
+      MaterialApp(home: PageManagementPage(sessionManager: manager)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(
+      find.byKey(const ValueKey('gallery-quick-corner-/raw_1.jpg')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(QuickCornerEditPage), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('quick-corner-cancel-appbar')));
+    await tester.pumpAndSettle();
+    expect(find.byType(PageManagementPage), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('pdfGalleryCard-/raw_1.jpg')),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('gallery completion opens review with only selected pages', (
     tester,
   ) async {
@@ -175,6 +201,34 @@ void main() {
       }
     },
   );
+
+  testWidgets('PDF Review quick corner edit returns to the same order', (
+    tester,
+  ) async {
+    final manager = _viewerManagerWithPages(1);
+    addTearDown(manager.close);
+    await tester.pumpWidget(
+      MaterialApp(home: PageManagementPage(sessionManager: manager)),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('toggleSelectAllButton')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('reviewSelectedPagesButton')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(
+      find.byKey(const ValueKey('pdf-review-quick-corner-/raw_1.jpg')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(QuickCornerEditPage), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('quick-corner-cancel-appbar')));
+    await tester.pumpAndSettle();
+    expect(find.byType(PdfPageReviewPage), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('pdf-review-card-/raw_1.jpg')),
+      findsOneWidget,
+    );
+  });
 
   testWidgets(
     'review tap keeps order and long press drag updates PDF numbers',
@@ -720,7 +774,7 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('재촬영'), findsOneWidget);
-      expect(find.text('편집'), findsOneWidget);
+      expect(find.text('모서리 수정'), findsOneWidget);
       expect(find.text('삭제'), findsOneWidget);
 
       await tester.tap(find.byKey(const ValueKey('viewer-rotate-button')));
@@ -800,6 +854,76 @@ void main() {
       expect(find.text('스캔본으로 돌아가기'), findsOneWidget);
     },
   );
+  testWidgets('DEBUG Page Editor exposes AI segmentation comparison', (
+    tester,
+  ) async {
+    final manager = ScanSessionManager(storage: _TestSessionStorage());
+    addTearDown(manager.close);
+    final session = ScanSession(
+      id: 'ai-comparison-session',
+      createdTime: DateTime.utc(2026, 8, 12),
+    );
+    session.addPage(
+      ScanPage(
+        pageNo: 1,
+        rawImagePath: '/raw.jpg',
+        createdTime: DateTime.utc(2026, 8, 12),
+        aiSegmentationResult: const AiDocumentSegmentationResult(
+          success: true,
+          modelVersion: 'v1.2.0',
+          modelLoadMs: 20,
+          preprocessMs: 10,
+          inferenceTimeMs: 80,
+          postprocessMs: 10,
+          totalMs: 100,
+          sourceWidth: 1000,
+          sourceHeight: 1500,
+          maskWidth: 256,
+          maskHeight: 256,
+          confidence: 0.9,
+          maskCoverage: 0.7,
+          pageSide: 'single',
+          refinementAttempted: true,
+          refinementAccepted: true,
+          mainPageOwnershipScore: 0.91,
+          outerEnvelopeConsistency: 0.86,
+          edgeContinuity: 0.9,
+          adjacentPagePenalty: 0.08,
+          occlusionPenalty: 0.12,
+          refinedConfidence: 0.88,
+          refinedStatus: AiRefinedBoundaryStatus.accepted,
+        ),
+      ),
+    );
+    manager.restoreSession(session);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: PageEditorPage(
+          sessionManager: manager,
+          initialPageIndex: 0,
+          showPageList: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('ai-detection-comparison-button')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('AI 검출 비교'), findsWidgets);
+    expect(find.byKey(const ValueKey('ai-comparison-raw')), findsOneWidget);
+    expect(find.byKey(const ValueKey('ai-comparison-openCv')), findsOneWidget);
+    expect(find.byKey(const ValueKey('ai-comparison-aiRaw')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('ai-comparison-aiRefined')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('ai-comparison-aiMask')), findsOneWidget);
+    expect(find.textContaining('ownership 0.91'), findsOneWidget);
+    expect(find.textContaining('accepted'), findsOneWidget);
+  });
 }
 
 ScanSessionManager _viewerManagerWithPages(int count) {

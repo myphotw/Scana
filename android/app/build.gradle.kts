@@ -46,6 +46,9 @@ flutter {
 
 dependencies {
     implementation("org.opencv:opencv:4.13.0")
+    // AI comparison PoC: bundled CPU-only LiteRT inference. The model itself
+    // lives in src/main/assets, so no runtime download or network permission is required.
+    implementation("com.google.ai.edge.litert:litert:1.4.1")
     // Bundled Korean model: available on first run without a network download.
     implementation("com.google.mlkit:text-recognition-korean:16.0.1")
 }

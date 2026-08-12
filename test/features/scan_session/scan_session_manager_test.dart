@@ -11,7 +11,10 @@ import 'package:scana/models/page_boundary.dart';
 import 'package:scana/models/scan_page.dart';
 import 'package:scana/models/scan_capture_mode.dart';
 import 'package:scana/models/page_enhancement.dart';
+import 'package:scana/models/page_crop.dart';
+import 'package:scana/models/ai_document_segmentation_result.dart';
 import 'package:scana/services/image_processing/document_detector.dart';
+import 'package:scana/services/image_processing/ai_document_segmenter.dart';
 import 'package:scana/services/image_processing/page_enhancer.dart';
 import 'package:scana/services/image_processing/page_corrector.dart';
 import 'package:scana/services/image_processing/spread_capture_splitter.dart';
@@ -384,6 +387,7 @@ void main() {
       expect(page.documentSourceWidth, 1000);
       expect(page.documentSourceHeight, 1500);
       expect(page.documentCorners?.topLeft.x, 50);
+      expect(page.cropSource, CropSource.highResPaperBoundary);
 
       const adjustedCorners = DocumentCorners(
         topLeft: DocumentPoint(80, 70),
@@ -402,6 +406,7 @@ void main() {
       final recovered = (await manager.findRecoverableSessions()).single;
       expect(recovered.pages.single.documentCorners?.bottomRight.x, 900);
       expect(recovered.pages.single.documentCorners?.bottomRight.y, 1400);
+      expect(recovered.pages.single.cropSource, CropSource.manualCorners);
     },
   );
 
@@ -816,7 +821,7 @@ void main() {
   });
 
   test(
-    'prefers a reliable high-resolution boundary over live preview',
+    'keeps the displayed sane live boundary ahead of a different high-resolution candidate',
     () async {
       manager.close();
       manager = ScanSessionManager(
@@ -833,8 +838,9 @@ void main() {
         stablePreviewBoundary: _previewBoundary(),
       );
 
-      expect(page.pageBoundary!.top.first.x, 50);
-      expect(page.documentCorners!.topLeft.x, 50);
+      expect(page.pageBoundary!.top.first.x, 100);
+      expect(page.documentCorners!.topLeft.x, 100);
+      expect(page.cropSource, CropSource.captureLiveBoundary);
     },
   );
 
@@ -1188,6 +1194,174 @@ void main() {
     expect(await File(page.rawImagePath).exists(), isTrue);
     expect(await File(page.correctedImagePath!).exists(), isTrue);
   });
+
+  test(
+    'Single capture stores AI comparison without replacing OpenCV crop',
+    () async {
+      manager.close();
+      final ai = _RecordingAiSegmenter();
+      manager = ScanSessionManager(
+        storage: AppPrivateSessionStorage(
+          appPrivateDirectoryProvider: () async => testRoot,
+        ),
+        documentDetector: const _SuccessfulDocumentDetector(),
+        pageCorrector: const _SuccessfulPageCorrector(),
+        pageEnhancer: const _SuccessfulPageEnhancer(),
+        aiDocumentSegmenter: ai,
+        sessionIdGenerator: () => 'ai-single',
+      );
+
+      final page = await manager.captureAndProcess(
+        (await _createCapture(testRoot, 'ai-single.jpg')).path,
+      );
+
+      expect(ai.pageSides, [null]);
+      expect(page.aiSegmentationResult?.success, isTrue);
+      expect(page.aiSegmentationResult?.hasUsableRefinedBoundary, isTrue);
+      expect(page.aiSegmentationResult?.refinedCorners?.topLeft.x, 20);
+      expect(page.cropSource, CropSource.highResPaperBoundary);
+      expect(page.documentCorners?.topLeft.x, 50);
+    },
+  );
+
+  test(
+    'Spread capture invokes AI independently in left to right order',
+    () async {
+      manager.close();
+      final ai = _RecordingAiSegmenter();
+      manager = ScanSessionManager(
+        storage: AppPrivateSessionStorage(
+          appPrivateDirectoryProvider: () async => testRoot,
+        ),
+        documentDetector: const _SuccessfulDocumentDetector(),
+        pageCorrector: const _SuccessfulPageCorrector(),
+        pageEnhancer: const _SuccessfulPageEnhancer(),
+        spreadCaptureSplitter: const _TestSpreadCaptureSplitter(),
+        spreadFallbackCropper: const _TestSpreadFallbackCropper(),
+        aiDocumentSegmenter: ai,
+        sessionIdGenerator: () => 'ai-spread',
+      );
+
+      final pages = await manager.captureAndProcessSpread(
+        (await _createCapture(testRoot, 'ai-spread.jpg')).path,
+      );
+
+      expect(ai.pageSides, [DocumentPageSide.left, DocumentPageSide.right]);
+      expect(pages.map((page) => page.pageNo), [1, 2]);
+      expect(pages.every((page) => page.aiSegmentationResult != null), isTrue);
+    },
+  );
+
+  test(
+    'AI failure does not affect correction, Gallery source, or page',
+    () async {
+      manager.close();
+      manager = ScanSessionManager(
+        storage: AppPrivateSessionStorage(
+          appPrivateDirectoryProvider: () async => testRoot,
+        ),
+        documentDetector: const _SuccessfulDocumentDetector(),
+        pageCorrector: const _SuccessfulPageCorrector(),
+        pageEnhancer: const _SuccessfulPageEnhancer(),
+        aiDocumentSegmenter: _RecordingAiSegmenter(fail: true),
+        sessionIdGenerator: () => 'ai-failure',
+      );
+
+      final page = await manager.captureAndProcess(
+        (await _createCapture(testRoot, 'ai-failure.jpg')).path,
+      );
+
+      expect(page.aiSegmentationResult?.success, isFalse);
+      expect(page.correctionStatus, CorrectionStatus.completed);
+      expect(page.enhancementStatus, EnhancementStatus.completed);
+      expect(page.cropSource, CropSource.highResPaperBoundary);
+      expect(await File(page.displayImagePath).exists(), isTrue);
+    },
+  );
+
+  test(
+    'quick corner apply persists manual source and regenerates scan result',
+    () async {
+      manager.close();
+      manager = ScanSessionManager(
+        storage: AppPrivateSessionStorage(
+          appPrivateDirectoryProvider: () async => testRoot,
+        ),
+        documentDetector: const _SuccessfulDocumentDetector(),
+        pageCorrector: const _SuccessfulPageCorrector(),
+        pageEnhancer: const _SuccessfulPageEnhancer(),
+        sessionIdGenerator: () => 'manual-corners',
+      );
+      final initial = await manager.captureAndProcess(
+        (await _createCapture(testRoot, 'manual.jpg')).path,
+      );
+      final previousCorrected = initial.correctedImagePath;
+      final previousEnhanced = initial.enhancedImagePath;
+      const manual = DocumentCorners(
+        topLeft: DocumentPoint(70, 80),
+        topRight: DocumentPoint(930, 75),
+        bottomRight: DocumentPoint(940, 1420),
+        bottomLeft: DocumentPoint(60, 1415),
+      );
+
+      expect(await manager.applyManualCornersAt(0, manual), isTrue);
+      final updated = manager.currentSession!.pages.single;
+      expect(updated.hasUserAdjustedCorners, isTrue);
+      expect(updated.cropSource, CropSource.manualCorners);
+      expect(updated.documentCorners?.topLeft.x, 70);
+      expect(updated.correctedImagePath, isNot(previousCorrected));
+      expect(updated.enhancedImagePath, isNot(previousEnhanced));
+      expect(updated.correctionStatus, CorrectionStatus.completed);
+      expect(updated.enhancementStatus, EnhancementStatus.completed);
+
+      final metadataFile = File(
+        path.join(
+          testRoot.path,
+          'scan_sessions',
+          'manual-corners',
+          'session.json',
+        ),
+      );
+      final metadata = jsonDecode(await metadataFile.readAsString()) as Map;
+      final pageMetadata = (metadata['pages'] as List).single as Map;
+      expect(pageMetadata['cropSource'], 'manualCorners');
+
+      final recovered = (await manager.findRecoverableSessions()).single;
+      expect(recovered.pages.single.cropSource, CropSource.manualCorners);
+      expect(recovered.pages.single.hasUserAdjustedCorners, isTrue);
+      expect(recovered.pages.single.documentCorners?.bottomRight.y, 1420);
+    },
+  );
+
+  test('failed quick corner apply restores prior page metadata', () async {
+    manager.close();
+    manager = ScanSessionManager(
+      storage: AppPrivateSessionStorage(
+        appPrivateDirectoryProvider: () async => testRoot,
+      ),
+      documentDetector: const _SuccessfulDocumentDetector(),
+      pageCorrector: const _FailingPageCorrector(),
+      sessionIdGenerator: () => 'manual-failure',
+    );
+    final initial = await manager.addRawCapture(
+      (await _createCapture(testRoot, 'manual-failure.jpg')).path,
+    );
+    const attempted = DocumentCorners(
+      topLeft: DocumentPoint(200, 200),
+      topRight: DocumentPoint(800, 200),
+      bottomRight: DocumentPoint(800, 1300),
+      bottomLeft: DocumentPoint(200, 1300),
+    );
+
+    expect(await manager.applyManualCornersAt(0, attempted), isFalse);
+    final restored = manager.currentSession!.pages.single;
+    expect(
+      restored.documentCorners?.topLeft.x,
+      initial.documentCorners?.topLeft.x,
+    );
+    expect(restored.cropSource, initial.cropSource);
+    expect(restored.hasUserAdjustedCorners, isFalse);
+  });
 }
 
 ScanSessionManager _spreadManager(
@@ -1257,6 +1431,70 @@ class _SuccessfulDocumentDetector implements DocumentDetector {
         bottomRight: DocumentPoint(950, 1450),
         bottomLeft: DocumentPoint(50, 1450),
       ),
+    );
+  }
+}
+
+class _RecordingAiSegmenter implements AiDocumentSegmenter {
+  _RecordingAiSegmenter({this.fail = false});
+
+  final bool fail;
+  final List<DocumentPageSide?> pageSides = [];
+
+  @override
+  Future<AiDocumentModelInfo?> getModelInfo() async => null;
+
+  @override
+  Future<AiDocumentSegmentationResult> segment(
+    String imagePath, {
+    DocumentPageSide? pageSide,
+    DocumentCorners? openCvCorners,
+    String? debugOutputDirectory,
+    required String debugStem,
+  }) async {
+    pageSides.add(pageSide);
+    return AiDocumentSegmentationResult(
+      success: !fail,
+      modelVersion: 'test',
+      modelLoadMs: 1,
+      preprocessMs: 2,
+      inferenceTimeMs: 3,
+      postprocessMs: 4,
+      totalMs: 10,
+      sourceWidth: 1000,
+      sourceHeight: 1500,
+      maskWidth: 256,
+      maskHeight: 256,
+      confidence: fail ? null : 0.9,
+      maskCoverage: fail ? 0 : 0.7,
+      pageSide: pageSide?.name ?? 'single',
+      corners: fail ? null : openCvCorners,
+      refinementAttempted: !fail,
+      refinementAccepted: !fail,
+      refinedCorners: fail
+          ? null
+          : const DocumentCorners(
+              topLeft: DocumentPoint(20, 20),
+              topRight: DocumentPoint(980, 20),
+              bottomRight: DocumentPoint(980, 1480),
+              bottomLeft: DocumentPoint(20, 1480),
+            ),
+      totalRefineMs: fail ? 0 : 5,
+      rawAreaRatio: fail ? 0 : 0.84,
+      refinedAreaRatio: fail ? 0 : 0.93,
+      aiContainmentRatio: fail ? 0 : 0.99,
+      areaExpansionRatio: fail ? 1 : 1.1,
+      paperTransitionScore: fail ? 0 : 0.8,
+      mainPageOwnershipScore: fail ? 0 : 0.9,
+      outerEnvelopeConsistency: fail ? 0 : 0.85,
+      edgeContinuity: fail ? 0 : 0.88,
+      adjacentPagePenalty: fail ? 0 : 0.08,
+      occlusionPenalty: fail ? 0 : 0.12,
+      refinedConfidence: fail ? 0 : 0.87,
+      refinedStatus: fail
+          ? AiRefinedBoundaryStatus.rawFallback
+          : AiRefinedBoundaryStatus.accepted,
+      failureReason: fail ? 'test_failure' : null,
     );
   }
 }

@@ -4,6 +4,8 @@ import 'package:scana/models/page_correction.dart';
 import 'package:scana/models/page_boundary.dart';
 import 'package:scana/models/scan_capture_mode.dart';
 import 'package:scana/models/page_enhancement.dart';
+import 'package:scana/models/page_crop.dart';
+import 'package:scana/models/ai_document_segmentation_result.dart';
 
 /// Groups the raw pages that belong to one scanning operation.
 class ScanSession {
@@ -54,14 +56,24 @@ class ScanSession {
     DocumentCorners? captureGuideCorners,
     DocumentCorners? resolvedCorners,
     PageBoundary? resolvedBoundary,
+    CropSource? cropSource,
+    double? captureBoundaryConfidence,
+    double? captureBoundaryStability,
   }) {
     _pages[index] = _pages[index]
         .withDetection(
           detection,
           resolvedCorners: resolvedCorners,
           resolvedBoundary: resolvedBoundary,
+          cropSource: cropSource,
+          captureBoundaryConfidence: captureBoundaryConfidence,
+          captureBoundaryStability: captureBoundaryStability,
         )
         .copyWith(captureGuideCorners: captureGuideCorners);
+  }
+
+  void updateAiSegmentationAt(int index, AiDocumentSegmentationResult result) {
+    _pages[index] = _pages[index].copyWith(aiSegmentationResult: result);
   }
 
   void updateDocumentCornersAt(int index, DocumentCorners corners) {

@@ -2,7 +2,9 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as path;
 
 import 'package:scana/features/scan_session/application/scan_session_manager.dart';
 import 'package:scana/models/document_detection_result.dart';
@@ -173,15 +175,31 @@ class _SelectedPageWorkbenchState extends State<_SelectedPageWorkbench> {
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-          child: Align(
-            alignment: Alignment.centerRight,
-            child: TextButton.icon(
-              onPressed: () => setState(() => _showCorrected = !_showCorrected),
-              icon: Icon(
-                _showCorrected ? Icons.crop_free_outlined : Icons.auto_fix_high,
+          child: Row(
+            children: [
+              if (kDebugMode && page.aiSegmentationResult != null)
+                TextButton.icon(
+                  key: const ValueKey('ai-detection-comparison-button'),
+                  onPressed: () => showDialog<void>(
+                    context: context,
+                    builder: (context) =>
+                        _AiSegmentationComparisonDialog(page: page),
+                  ),
+                  icon: const Icon(Icons.compare_outlined),
+                  label: const Text('AI 검출 비교'),
+                ),
+              const Spacer(),
+              TextButton.icon(
+                onPressed: () =>
+                    setState(() => _showCorrected = !_showCorrected),
+                icon: Icon(
+                  _showCorrected
+                      ? Icons.crop_free_outlined
+                      : Icons.auto_fix_high,
+                ),
+                label: Text(_showCorrected ? '모서리 수정' : '스캔본으로 돌아가기'),
               ),
-              label: Text(_showCorrected ? '모서리 수정' : '스캔본으로 돌아가기'),
-            ),
+            ],
           ),
         ),
         Expanded(
@@ -639,6 +657,139 @@ class _PageThumbnail extends StatelessWidget {
                 return const Icon(Icons.image_not_supported_outlined);
               },
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+enum _AiComparisonView { raw, openCv, aiRaw, aiRefined, aiMask }
+
+class _AiSegmentationComparisonDialog extends StatefulWidget {
+  const _AiSegmentationComparisonDialog({required this.page});
+
+  final ScanPage page;
+
+  @override
+  State<_AiSegmentationComparisonDialog> createState() =>
+      _AiSegmentationComparisonDialogState();
+}
+
+class _AiSegmentationComparisonDialogState
+    extends State<_AiSegmentationComparisonDialog> {
+  late _AiComparisonView _view;
+
+  @override
+  void initState() {
+    super.initState();
+    final result = widget.page.aiSegmentationResult!;
+    _view = result.debugAiRefinedOverlayFile == null
+        ? _AiComparisonView.aiRaw
+        : _AiComparisonView.aiRefined;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final result = widget.page.aiSegmentationResult!;
+    final sessionDirectory = path.dirname(widget.page.rawImagePath);
+    final files = <_AiComparisonView, String?>{
+      _AiComparisonView.raw:
+          result.resolveDebugArtifact(sessionDirectory, result.debugRawFile) ??
+          widget.page.rawImagePath,
+      _AiComparisonView.openCv: result.resolveDebugArtifact(
+        sessionDirectory,
+        result.debugOpenCvOverlayFile,
+      ),
+      _AiComparisonView.aiRaw: result.resolveDebugArtifact(
+        sessionDirectory,
+        result.debugAiRawOverlayFile ?? result.debugAiOverlayFile,
+      ),
+      _AiComparisonView.aiRefined: result.resolveDebugArtifact(
+        sessionDirectory,
+        result.debugAiRefinedOverlayFile,
+      ),
+      _AiComparisonView.aiMask: result.resolveDebugArtifact(
+        sessionDirectory,
+        result.debugMaskFile,
+      ),
+    };
+    final selectedPath = files[_view];
+    return Dialog.fullscreen(
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('AI 검출 비교'),
+          leading: IconButton(
+            onPressed: () => Navigator.of(context).pop(),
+            icon: const Icon(Icons.close),
+          ),
+        ),
+        body: SafeArea(
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: _AiComparisonView.values.map((view) {
+                    final label = switch (view) {
+                      _AiComparisonView.raw => '원본',
+                      _AiComparisonView.openCv => 'OpenCV',
+                      _AiComparisonView.aiRaw => 'AI Raw',
+                      _AiComparisonView.aiRefined => 'AI Refined',
+                      _AiComparisonView.aiMask => 'AI Mask',
+                    };
+                    return ChoiceChip(
+                      key: ValueKey('ai-comparison-${view.name}'),
+                      label: Text(label),
+                      selected: _view == view,
+                      onSelected: files[view] == null
+                          ? null
+                          : (_) => setState(() => _view = view),
+                    );
+                  }).toList(),
+                ),
+              ),
+              Expanded(
+                child: selectedPath != null && File(selectedPath).existsSync()
+                    ? InteractiveViewer(
+                        minScale: 0.5,
+                        maxScale: 6,
+                        child: Center(
+                          child: Image.file(
+                            File(selectedPath),
+                            fit: BoxFit.contain,
+                            errorBuilder: (context, error, stackTrace) =>
+                                const Center(child: Text('비교 이미지를 열 수 없습니다.')),
+                          ),
+                        ),
+                      )
+                    : const Center(child: Text('이 결과에는 DEBUG 비교 이미지가 없습니다.')),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                child: Text(
+                  'AI ${result.success ? "성공" : "실패"} · '
+                  'coverage ${(result.maskCoverage * 100).toStringAsFixed(1)}% · '
+                  'inference ${result.inferenceTimeMs}ms · '
+                  'refine ${result.totalRefineMs}ms · '
+                  'total ${result.totalMs}ms\n'
+                  'refined ${result.refinementAccepted ? "채택" : "fallback"} · '
+                  'containment ${(result.aiContainmentRatio * 100).toStringAsFixed(1)}% · '
+                  'expansion ${result.areaExpansionRatio.toStringAsFixed(2)}× · '
+                  'transition ${result.paperTransitionScore.toStringAsFixed(2)}\n'
+                  'ownership ${result.mainPageOwnershipScore.toStringAsFixed(2)} · '
+                  'occlusion ${result.occlusionPenalty.toStringAsFixed(2)} · '
+                  'adjacent ${result.adjacentPagePenalty.toStringAsFixed(2)} · '
+                  'quality ${result.refinedConfidence.toStringAsFixed(2)} · '
+                  '${result.refinedStatus.serializedName}'
+                  '${result.refinementAccepted || result.refinementFailureReason == null ? "" : " · ${result.refinementFailureReason}"}'
+                  '${result.failureReason == null ? "" : " · ${result.failureReason}"}',
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ],
           ),
         ),
       ),

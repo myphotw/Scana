@@ -11,6 +11,8 @@ import 'package:scana/models/page_correction.dart';
 import 'package:scana/models/page_boundary.dart';
 import 'package:scana/models/scan_capture_mode.dart';
 import 'package:scana/models/page_enhancement.dart';
+import 'package:scana/models/page_crop.dart';
+import 'package:scana/models/ai_document_segmentation_result.dart';
 
 typedef AppPrivateDirectoryProvider = Future<Directory> Function();
 
@@ -126,6 +128,13 @@ class AppPrivateSessionStorage
                 'captureGuideCorners': page.captureGuideCorners!.toJson(),
               if (page.detectionConfidence != null)
                 'detectionConfidence': page.detectionConfidence!,
+              if (page.cropSource != null) 'cropSource': page.cropSource!.name,
+              if (page.captureBoundaryConfidence != null)
+                'captureBoundaryConfidence': page.captureBoundaryConfidence!,
+              if (page.captureBoundaryStability != null)
+                'captureBoundaryStability': page.captureBoundaryStability!,
+              if (page.aiSegmentationResult != null)
+                'aiSegmentation': page.aiSegmentationResult!.toJson(),
               'spreadFallbackUsed': page.spreadFallbackUsed,
               'hasUserAdjustedCorners': page.hasUserAdjustedCorners,
               if (page.correctedImagePath != null)
@@ -229,6 +238,16 @@ class AppPrivateSessionStorage
         final captureGuideCorners = DocumentCorners.fromJson(guideCornersValue);
         final detectionConfidence = (pageData['detectionConfidence'] as num?)
             ?.toDouble();
+        final cropSource = CropSource.values
+            .where((source) => source.name == pageData['cropSource'])
+            .firstOrNull;
+        final captureBoundaryConfidence =
+            (pageData['captureBoundaryConfidence'] as num?)?.toDouble();
+        final captureBoundaryStability =
+            (pageData['captureBoundaryStability'] as num?)?.toDouble();
+        final aiSegmentationResult = AiDocumentSegmentationResult.fromJson(
+          pageData['aiSegmentation'],
+        );
         final spreadFallbackUsed =
             pageData['spreadFallbackUsed'] as bool? ?? false;
         final hasUserAdjustedCorners =
@@ -322,6 +341,10 @@ class AppPrivateSessionStorage
             documentSourceHeight: sourceHeight,
             captureGuideCorners: captureGuideCorners,
             detectionConfidence: detectionConfidence,
+            cropSource: cropSource,
+            captureBoundaryConfidence: captureBoundaryConfidence,
+            captureBoundaryStability: captureBoundaryStability,
+            aiSegmentationResult: aiSegmentationResult,
             spreadFallbackUsed: spreadFallbackUsed,
             hasUserAdjustedCorners: hasUserAdjustedCorners,
             correctedImagePath: correctedImagePath,
@@ -529,6 +552,10 @@ class AppPrivateSessionStorage
       page.rawImagePath,
       if (page.correctedImagePath != null) page.correctedImagePath!,
       if (page.enhancedImagePath != null) page.enhancedImagePath!,
+      ...page.aiSegmentationResult?.debugArtifactFiles.map(
+            (relativePath) => path.join(parentDirectory, relativePath),
+          ) ??
+          const <String>[],
     };
     final correctionFilePattern = RegExp(
       r'^\.?corrected(?:_curved)?_' +

@@ -68,10 +68,22 @@ DocumentDetectionResult documentDetectionResultFromNative(
 
   final corners = _cornersFromNative(value['corners']);
   final boundary = PageBoundary.fromJson(value['boundary']);
+  final contentSafeCorners = _cornersFromNative(value['contentSafeCorners']);
+  final contentBounds = _cornersFromNative(value['contentBounds']);
   return DocumentDetectionResult(
     detected: detected && (corners != null || boundary != null),
     corners: corners,
     boundary: boundary,
+    contentSafeCorners: contentSafeCorners,
+    contentBounds: contentBounds,
+    contentSafeConfidence:
+        (value['contentSafeConfidence'] as num?)?.toDouble().clamp(0, 1) ?? 0,
+    contentComponentCount: value['contentComponentCount'] as int? ?? 0,
+    contentSafeMarginX:
+        (value['contentSafeMarginX'] as num?)?.toDouble().clamp(0, 1) ?? 0,
+    contentSafeMarginY:
+        (value['contentSafeMarginY'] as num?)?.toDouble().clamp(0, 1) ?? 0,
+    paperRegionCandidate: value['paperRegionCandidate'] as bool? ?? false,
     confidence: confidence.toDouble().clamp(0.0, 1.0).toDouble(),
     sourceWidth: sourceWidth,
     sourceHeight: sourceHeight,

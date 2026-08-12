@@ -2,6 +2,8 @@ import 'package:scana/models/document_detection_result.dart';
 import 'package:scana/models/page_correction.dart';
 import 'package:scana/models/page_boundary.dart';
 import 'package:scana/models/page_enhancement.dart';
+import 'package:scana/models/page_crop.dart';
+import 'package:scana/models/ai_document_segmentation_result.dart';
 
 /// A raw page captured during a scan session.
 class ScanPage {
@@ -16,6 +18,10 @@ class ScanPage {
     this.documentSourceHeight,
     this.captureGuideCorners,
     this.detectionConfidence,
+    this.cropSource,
+    this.captureBoundaryConfidence,
+    this.captureBoundaryStability,
+    this.aiSegmentationResult,
     this.spreadFallbackUsed = false,
     this.hasUserAdjustedCorners = false,
     this.correctedImagePath,
@@ -39,6 +45,10 @@ class ScanPage {
   final int? documentSourceHeight;
   final DocumentCorners? captureGuideCorners;
   final double? detectionConfidence;
+  final CropSource? cropSource;
+  final double? captureBoundaryConfidence;
+  final double? captureBoundaryStability;
+  final AiDocumentSegmentationResult? aiSegmentationResult;
   final bool spreadFallbackUsed;
   final bool hasUserAdjustedCorners;
   final String? correctedImagePath;
@@ -70,6 +80,10 @@ class ScanPage {
     int? documentSourceHeight,
     DocumentCorners? captureGuideCorners,
     double? detectionConfidence,
+    CropSource? cropSource,
+    double? captureBoundaryConfidence,
+    double? captureBoundaryStability,
+    AiDocumentSegmentationResult? aiSegmentationResult,
     bool? spreadFallbackUsed,
     bool? hasUserAdjustedCorners,
     String? correctedImagePath,
@@ -91,6 +105,12 @@ class ScanPage {
       documentSourceHeight: documentSourceHeight ?? this.documentSourceHeight,
       captureGuideCorners: captureGuideCorners ?? this.captureGuideCorners,
       detectionConfidence: detectionConfidence ?? this.detectionConfidence,
+      cropSource: cropSource ?? this.cropSource,
+      captureBoundaryConfidence:
+          captureBoundaryConfidence ?? this.captureBoundaryConfidence,
+      captureBoundaryStability:
+          captureBoundaryStability ?? this.captureBoundaryStability,
+      aiSegmentationResult: aiSegmentationResult ?? this.aiSegmentationResult,
       spreadFallbackUsed: spreadFallbackUsed ?? this.spreadFallbackUsed,
       hasUserAdjustedCorners:
           hasUserAdjustedCorners ?? this.hasUserAdjustedCorners,
@@ -110,6 +130,9 @@ class ScanPage {
     DocumentDetectionResult detection, {
     DocumentCorners? resolvedCorners,
     PageBoundary? resolvedBoundary,
+    CropSource? cropSource,
+    double? captureBoundaryConfidence,
+    double? captureBoundaryStability,
   }) {
     return copyWith(
       documentCorners: resolvedCorners ?? detection.corners,
@@ -121,6 +144,9 @@ class ScanPage {
           ? detection.sourceHeight
           : documentSourceHeight,
       detectionConfidence: detection.confidence,
+      cropSource: cropSource,
+      captureBoundaryConfidence: captureBoundaryConfidence,
+      captureBoundaryStability: captureBoundaryStability,
       hasUserAdjustedCorners: false,
     );
   }
@@ -129,6 +155,7 @@ class ScanPage {
     return copyWith(
       documentCorners: corners,
       pageBoundary: pageBoundary?.withRepresentativeCorners(corners),
+      cropSource: CropSource.manualCorners,
       hasUserAdjustedCorners: true,
       correctionStatus: CorrectionStatus.none,
       enhancementStatus: EnhancementStatus.none,

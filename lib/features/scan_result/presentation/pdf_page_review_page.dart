@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'package:scana/features/scan_session/application/scan_session_manager.dart';
+import 'package:scana/features/page_editor/presentation/quick_corner_edit_page.dart';
 import 'package:scana/models/scan_page.dart';
 import 'package:scana/services/diagnostics/debug_diagnostics.dart';
 import 'package:scana/services/ocr/ocr_service.dart';
@@ -205,6 +206,8 @@ class _PdfPageReviewPageState extends State<PdfPageReviewPage>
                                 _movePage(rawPath, page.rawImagePath),
                             onAccept: (_) {},
                             onTap: () => _openViewer(index),
+                            onQuickEdit: () =>
+                                _quickEditCorners(page.rawImagePath),
                           ),
                         );
                       },
@@ -328,6 +331,36 @@ class _PdfPageReviewPageState extends State<PdfPageReviewPage>
       ),
     );
     if (!mounted) return;
+  }
+
+  Future<void> _quickEditCorners(String rawImagePath) async {
+    if (_isDragging || _exportFlowActive) return;
+    final sessionPages =
+        widget.sessionManager.currentSession?.pages ?? const [];
+    final sessionIndex = sessionPages.indexWhere(
+      (page) => page.rawImagePath == rawImagePath,
+    );
+    if (sessionIndex < 0) return;
+    final applied = await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(
+        builder: (context) => QuickCornerEditPage(
+          sessionManager: widget.sessionManager,
+          pageIndex: sessionIndex,
+          orientationController: widget.orientationController,
+        ),
+      ),
+    );
+    if (!mounted || applied != true) return;
+    final updated = widget.sessionManager.currentSession?.pages
+        .where((page) => page.rawImagePath == rawImagePath)
+        .firstOrNull;
+    if (updated == null) return;
+    setState(() {
+      final orderIndex = _orderedPages.indexWhere(
+        (page) => page.rawImagePath == rawImagePath,
+      );
+      if (orderIndex >= 0) _orderedPages[orderIndex] = updated;
+    });
   }
 
   Future<void> _startPdfExport() async {
@@ -673,6 +706,7 @@ class _ReviewDragTarget extends StatelessWidget {
     required this.onHover,
     required this.onAccept,
     required this.onTap,
+    required this.onQuickEdit,
   });
 
   final ScanPage page;
@@ -684,6 +718,7 @@ class _ReviewDragTarget extends StatelessWidget {
   final ValueChanged<String> onHover;
   final ValueChanged<String> onAccept;
   final VoidCallback onTap;
+  final VoidCallback onQuickEdit;
 
   @override
   Widget build(BuildContext context) {
@@ -733,6 +768,7 @@ class _ReviewDragTarget extends StatelessWidget {
             pdfIndex: pdfIndex,
             elevated: highlighted || isDragging,
             onTap: onTap,
+            onQuickEdit: onQuickEdit,
           ),
         );
       },
@@ -747,12 +783,14 @@ class _ReviewCard extends StatelessWidget {
     required this.pdfIndex,
     this.elevated = false,
     this.onTap,
+    this.onQuickEdit,
   });
 
   final ScanPage page;
   final int pdfIndex;
   final bool elevated;
   final VoidCallback? onTap;
+  final VoidCallback? onQuickEdit;
 
   @override
   Widget build(BuildContext context) {
@@ -787,6 +825,17 @@ class _ReviewCard extends StatelessWidget {
                 child: Text('${pdfIndex + 1}'),
               ),
             ),
+            if (onQuickEdit != null)
+              Positioned(
+                top: 2,
+                right: 2,
+                child: IconButton.filledTonal(
+                  key: ValueKey('pdf-review-quick-corner-${page.rawImagePath}'),
+                  tooltip: '모서리 수정',
+                  onPressed: onQuickEdit,
+                  icon: const Icon(Icons.crop_free, size: 20),
+                ),
+              ),
           ],
         ),
       ),

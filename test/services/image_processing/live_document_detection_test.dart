@@ -128,6 +128,76 @@ void main() {
     },
   );
 
+  test(
+    'low confidence best candidate remains visible in orange level',
+    () async {
+      final controller = LiveDocumentDetectionController(
+        detector: _ImmediateDetector(_result(confidence: 0.12)),
+        boundaryStabilizer: PageBoundaryStabilizer(minimumConfidence: 0.22),
+        analysisInterval: Duration.zero,
+      );
+      addTearDown(controller.dispose);
+
+      await controller.submit(frame);
+
+      expect(controller.visibleNormalizedBoundary, isNotNull);
+      expect(controller.hasStableDocument, isFalse);
+      expect(controller.displayLevel, LiveGuideDisplayLevel.low);
+    },
+  );
+
+  test(
+    'normal-distance medium candidate is displayed without stability',
+    () async {
+      final controller = LiveDocumentDetectionController(
+        detector: _ImmediateDetector(_result(left: 20, confidence: 0.34)),
+        boundaryStabilizer: PageBoundaryStabilizer(minimumConfidence: 0.45),
+        analysisInterval: Duration.zero,
+      );
+      addTearDown(controller.dispose);
+
+      await controller.submit(frame);
+
+      expect(controller.visibleNormalizedBoundary, isNotNull);
+      expect(controller.displayLevel, LiveGuideDisplayLevel.medium);
+    },
+  );
+
+  test('live guide maps confidence and stability to display levels', () {
+    expect(
+      LiveGuidePolicy.levelFor(
+        candidateAvailable: false,
+        confidence: 1,
+        stable: true,
+      ),
+      LiveGuideDisplayLevel.none,
+    );
+    expect(
+      LiveGuidePolicy.levelFor(
+        candidateAvailable: true,
+        confidence: 0.12,
+        stable: false,
+      ),
+      LiveGuideDisplayLevel.low,
+    );
+    expect(
+      LiveGuidePolicy.levelFor(
+        candidateAvailable: true,
+        confidence: 0.34,
+        stable: false,
+      ),
+      LiveGuideDisplayLevel.medium,
+    );
+    expect(
+      LiveGuidePolicy.levelFor(
+        candidateAvailable: true,
+        confidence: 0.7,
+        stable: true,
+      ),
+      LiveGuideDisplayLevel.stable,
+    );
+  });
+
   test('three matching boundaries become strongly stable', () async {
     final controller = LiveDocumentDetectionController(
       detector: _ImmediateDetector(_result(confidence: 0.7)),
@@ -142,6 +212,42 @@ void main() {
 
     expect(controller.hasStableDocument, isTrue);
     expect(controller.stableNormalizedBoundary, isNotNull);
+  });
+
+  test('spread left-only candidate remains independently visible', () async {
+    final left = _controller(_result(confidence: 0.3));
+    final right = _controller(_result(confidence: 0));
+    addTearDown(left.dispose);
+    addTearDown(right.dispose);
+
+    await Future.wait([left.submit(frame), right.submit(frame)]);
+
+    expect(left.visibleNormalizedBoundary, isNotNull);
+    expect(right.visibleNormalizedBoundary, isNull);
+  });
+
+  test('spread right-only candidate remains independently visible', () async {
+    final left = _controller(_result(confidence: 0));
+    final right = _controller(_result(confidence: 0.3));
+    addTearDown(left.dispose);
+    addTearDown(right.dispose);
+
+    await Future.wait([left.submit(frame), right.submit(frame)]);
+
+    expect(left.visibleNormalizedBoundary, isNull);
+    expect(right.visibleNormalizedBoundary, isNotNull);
+  });
+
+  test('spread both candidates remain independently visible', () async {
+    final left = _controller(_result(left: 8, confidence: 0.3));
+    final right = _controller(_result(left: 52, confidence: 0.32));
+    addTearDown(left.dispose);
+    addTearDown(right.dispose);
+
+    await Future.wait([left.submit(frame), right.submit(frame)]);
+
+    expect(left.visibleNormalizedBoundary, isNotNull);
+    expect(right.visibleNormalizedBoundary, isNotNull);
   });
 
   test(
@@ -174,6 +280,13 @@ void main() {
     },
   );
 }
+
+LiveDocumentDetectionController _controller(DocumentDetectionResult result) =>
+    LiveDocumentDetectionController(
+      detector: _ImmediateDetector(result),
+      boundaryStabilizer: PageBoundaryStabilizer(minimumConfidence: 0.45),
+      analysisInterval: Duration.zero,
+    );
 
 Map<String, Object> _nativeBoundaryResult() => {
   'detected': true,

@@ -14,6 +14,7 @@ import 'package:scana/models/scan_session.dart';
 import 'package:scana/models/document_detection_result.dart';
 import 'package:scana/models/page_boundary.dart';
 import 'package:scana/models/scan_capture_mode.dart';
+import 'package:scana/models/capture_boundary_snapshot.dart';
 import 'package:scana/services/camera/camera_session.dart';
 import 'package:scana/services/image_processing/document_detector.dart';
 import 'package:scana/services/image_processing/live_document_detection.dart';
@@ -168,12 +169,18 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
     }
     _lastBoundaryLogState = stateKey;
     _lastBoundaryLogAt = now;
-    String summary(String label, LiveDocumentDetectionController value) {
+    String summary(
+      String label,
+      LiveDocumentDetectionController value,
+      CaptureBoundarySide side,
+    ) {
       final boundary = value.visibleNormalizedBoundary;
       final bounds = CameraPreviewBoundaryTransform.normalizedBounds(boundary);
       return '${label}Detected=${value.lastDetected} '
+          '${label}CandidateAvailable=${boundary != null} '
           '${label}Confidence=${value.lastConfidence.toStringAsFixed(3)} '
           '${label}Stable=${value.hasStableDocument} '
+          '${label}DisplayLevel=${value.displayLevelFor(side).name} '
           '${label}BoundaryPoints=${boundary?.closedPolygon.length ?? 0} '
           '${label}MinX=${bounds?.left.toStringAsFixed(3) ?? "n/a"} '
           '${label}MaxX=${bounds?.right.toStringAsFixed(3) ?? "n/a"} '
@@ -183,11 +190,11 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
 
     final first = controllers.first;
     DebugDiagnostics.instance.log(
-      'LIVE_BOUNDARY',
+      'LIVE_GUIDE',
       'mode=${mode.name} frameWidth=${first.lastFrameWidth} '
           'frameHeight=${first.lastFrameHeight} '
-          '${summary(mode == ScanCaptureMode.spread ? 'left' : '', first)} '
-          '${mode == ScanCaptureMode.spread ? summary('right', controllers.last) : ''}',
+          '${summary(mode == ScanCaptureMode.spread ? 'left' : '', first, mode == ScanCaptureMode.spread ? CaptureBoundarySide.left : CaptureBoundarySide.single)} '
+          '${mode == ScanCaptureMode.spread ? summary('right', controllers.last, CaptureBoundarySide.right) : ''}',
     );
   }
 
@@ -258,16 +265,33 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
       final captureGuideRegion = isSpread
           ? null
           : _ScanGuideGeometry.regionFor(MediaQuery.sizeOf(context));
-      final previewBoundary = isSpread
+      final controller = cameraSession.controller;
+      final deviceOrientationDegrees =
+          CameraPreviewBoundaryTransform.deviceOrientationDegrees(
+            controller.value.deviceOrientation,
+          );
+      final rotationDegrees = _previewRotation();
+      CaptureBoundarySnapshot? freeze(
+        LiveDocumentDetectionController detection,
+        CaptureBoundarySide side,
+      ) => detection.freezeCaptureBoundary(
+        captureMode: widget.sessionManager.captureMode,
+        side: side,
+        sensorOrientation: controller.description.sensorOrientation,
+        deviceOrientationDegrees: deviceOrientationDegrees,
+        jpegRotationDegrees: rotationDegrees,
+        mirrored:
+            controller.description.lensDirection == CameraLensDirection.front,
+      );
+      final singleSnapshot = isSpread
           ? null
-          : _liveDetection.stableNormalizedBoundary;
-      final stablePreviewBoundary = previewBoundary == null
-          ? null
-          : PreviewCornerMapper.boundaryToUpright(
-              previewBoundary,
-              cameraSession.controller.description.sensorOrientation,
-            );
-      final stablePreviewCorners = stablePreviewBoundary?.toDocumentCorners();
+          : freeze(_liveDetection, CaptureBoundarySide.single);
+      final leftSnapshot = isSpread
+          ? freeze(_leftLiveDetection, CaptureBoundarySide.left)
+          : null;
+      final rightSnapshot = isSpread
+          ? freeze(_rightLiveDetection, CaptureBoundarySide.right)
+          : null;
       await _stopPreviewAnalysis();
       final capturedImagePath = await cameraSession.captureRawImage();
       final replacementPageIndex = widget.replacementPageIndex;
@@ -276,8 +300,7 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
           replacementPageIndex,
           capturedImagePath,
           captureGuideRegion: captureGuideRegion,
-          stablePreviewCorners: stablePreviewCorners,
-          stablePreviewBoundary: stablePreviewBoundary,
+          captureBoundarySnapshot: singleSnapshot,
         );
         if (mounted) {
           Navigator.of(context).pop(replaced);
@@ -285,14 +308,19 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
         return;
       }
       if (isSpread) {
-        unawaited(_processSpreadCapture(capturedImagePath));
+        unawaited(
+          _processSpreadCapture(
+            capturedImagePath,
+            leftCaptureBoundarySnapshot: leftSnapshot,
+            rightCaptureBoundarySnapshot: rightSnapshot,
+          ),
+        );
       } else {
         unawaited(
           _processCapturedImage(
             capturedImagePath,
             captureGuideRegion!,
-            stablePreviewCorners,
-            stablePreviewBoundary,
+            singleSnapshot,
           ),
         );
       }
@@ -311,24 +339,30 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
   Future<void> _processCapturedImage(
     String capturedImagePath,
     CaptureGuideRegion captureGuideRegion,
-    DocumentCorners? stablePreviewCorners,
-    PageBoundary? stablePreviewBoundary,
+    CaptureBoundarySnapshot? captureBoundarySnapshot,
   ) async {
     try {
       await widget.sessionManager.captureAndProcess(
         capturedImagePath,
         captureGuideRegion: captureGuideRegion,
-        stablePreviewCorners: stablePreviewCorners,
-        stablePreviewBoundary: stablePreviewBoundary,
+        captureBoundarySnapshot: captureBoundarySnapshot,
       );
     } on Object {
       _showCaptureError();
     }
   }
 
-  Future<void> _processSpreadCapture(String capturedImagePath) async {
+  Future<void> _processSpreadCapture(
+    String capturedImagePath, {
+    CaptureBoundarySnapshot? leftCaptureBoundarySnapshot,
+    CaptureBoundarySnapshot? rightCaptureBoundarySnapshot,
+  }) async {
     try {
-      await widget.sessionManager.captureAndProcessSpread(capturedImagePath);
+      await widget.sessionManager.captureAndProcessSpread(
+        capturedImagePath,
+        leftCaptureBoundarySnapshot: leftCaptureBoundarySnapshot,
+        rightCaptureBoundarySnapshot: rightCaptureBoundarySnapshot,
+      );
     } on Object {
       _showCaptureError();
     }
@@ -386,14 +420,21 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
                     ? _liveDetection.visibleNormalizedBoundary
                     : null,
                 isStable: _liveDetection.hasStableDocument,
+                displayLevel: _liveDetection.displayLevel,
                 leftBoundary: captureMode == ScanCaptureMode.spread
                     ? _leftLiveDetection.visibleNormalizedBoundary
                     : null,
                 leftStable: _leftLiveDetection.hasStableDocument,
+                leftDisplayLevel: _leftLiveDetection.displayLevelFor(
+                  CaptureBoundarySide.left,
+                ),
                 rightBoundary: captureMode == ScanCaptureMode.spread
                     ? _rightLiveDetection.visibleNormalizedBoundary
                     : null,
                 rightStable: _rightLiveDetection.hasStableDocument,
+                rightDisplayLevel: _rightLiveDetection.displayLevelFor(
+                  CaptureBoundarySide.right,
+                ),
                 previewRotationDegrees: _previewRotation(),
               ),
             ),
@@ -598,20 +639,26 @@ class _ScanGuideOverlay extends StatelessWidget {
   const _ScanGuideOverlay({
     required this.boundary,
     required this.isStable,
+    required this.displayLevel,
     required this.previewRotationDegrees,
     this.leftBoundary,
     this.leftStable = false,
+    this.leftDisplayLevel = LiveGuideDisplayLevel.none,
     this.rightBoundary,
     this.rightStable = false,
+    this.rightDisplayLevel = LiveGuideDisplayLevel.none,
   });
 
   final PageBoundary? boundary;
   final bool isStable;
+  final LiveGuideDisplayLevel displayLevel;
   final int previewRotationDegrees;
   final PageBoundary? leftBoundary;
   final bool leftStable;
+  final LiveGuideDisplayLevel leftDisplayLevel;
   final PageBoundary? rightBoundary;
   final bool rightStable;
+  final LiveGuideDisplayLevel rightDisplayLevel;
 
   @override
   Widget build(BuildContext context) {
@@ -620,10 +667,13 @@ class _ScanGuideOverlay extends StatelessWidget {
         painter: _ScanGuidePainter(
           boundary: boundary,
           isStable: isStable,
+          displayLevel: displayLevel,
           leftBoundary: leftBoundary,
           leftStable: leftStable,
+          leftDisplayLevel: leftDisplayLevel,
           rightBoundary: rightBoundary,
           rightStable: rightStable,
+          rightDisplayLevel: rightDisplayLevel,
           previewRotationDegrees: previewRotationDegrees,
         ),
       ),
@@ -727,25 +777,31 @@ class _ScanGuidePainter extends CustomPainter {
   const _ScanGuidePainter({
     required this.boundary,
     required this.isStable,
+    required this.displayLevel,
     required this.previewRotationDegrees,
     this.leftBoundary,
     this.leftStable = false,
+    this.leftDisplayLevel = LiveGuideDisplayLevel.none,
     this.rightBoundary,
     this.rightStable = false,
+    this.rightDisplayLevel = LiveGuideDisplayLevel.none,
   });
 
   final PageBoundary? boundary;
   final bool isStable;
+  final LiveGuideDisplayLevel displayLevel;
   final int previewRotationDegrees;
   final PageBoundary? leftBoundary;
   final bool leftStable;
+  final LiveGuideDisplayLevel leftDisplayLevel;
   final PageBoundary? rightBoundary;
   final bool rightStable;
+  final LiveGuideDisplayLevel rightDisplayLevel;
   static DateTime? _lastPaintLogAt;
 
   @override
   void paint(Canvas canvas, Size size) {
-    void draw(PageBoundary? detectedBoundary, bool stable, Color color) {
+    void draw(PageBoundary? detectedBoundary, LiveGuideDisplayLevel level) {
       if (detectedBoundary == null) return;
       final points = detectedBoundary.closedPolygon
           .map(
@@ -764,18 +820,21 @@ class _ScanGuidePainter extends CustomPainter {
       canvas.drawPath(
         polygon,
         Paint()
-          ..color = (stable ? color : const Color(0xffffd54f)).withValues(
-            alpha: stable ? .98 : .76,
-          )
+          ..color = switch (level) {
+            LiveGuideDisplayLevel.stable => const Color(0xff4ade80),
+            LiveGuideDisplayLevel.medium => const Color(0xffffd54f),
+            LiveGuideDisplayLevel.low => const Color(0xffff7043),
+            LiveGuideDisplayLevel.none => Colors.transparent,
+          }.withValues(alpha: level == LiveGuideDisplayLevel.stable ? .98 : .82)
           ..style = PaintingStyle.stroke
-          ..strokeWidth = stable ? 3.5 : 2.5
+          ..strokeWidth = level == LiveGuideDisplayLevel.stable ? 3.5 : 2.5
           ..strokeJoin = StrokeJoin.round,
       );
     }
 
-    draw(boundary, isStable, const Color(0xff4ade80));
-    draw(leftBoundary, leftStable, const Color(0xff4ade80));
-    draw(rightBoundary, rightStable, const Color(0xff38bdf8));
+    draw(boundary, displayLevel);
+    draw(leftBoundary, leftDisplayLevel);
+    draw(rightBoundary, rightDisplayLevel);
     if (kDebugMode) {
       final now = DateTime.now();
       if (_lastPaintLogAt == null ||
@@ -818,10 +877,13 @@ class _ScanGuidePainter extends CustomPainter {
   bool shouldRepaint(covariant _ScanGuidePainter oldDelegate) =>
       oldDelegate.boundary != boundary ||
       oldDelegate.isStable != isStable ||
+      oldDelegate.displayLevel != displayLevel ||
       oldDelegate.leftBoundary != leftBoundary ||
       oldDelegate.leftStable != leftStable ||
+      oldDelegate.leftDisplayLevel != leftDisplayLevel ||
       oldDelegate.rightBoundary != rightBoundary ||
       oldDelegate.rightStable != rightStable ||
+      oldDelegate.rightDisplayLevel != rightDisplayLevel ||
       oldDelegate.previewRotationDegrees != previewRotationDegrees;
 }
 
@@ -833,16 +895,19 @@ class CameraPreviewBoundaryTransform {
     required DeviceOrientation deviceOrientation,
     required bool isFrontFacing,
   }) {
-    final deviceDegrees = switch (deviceOrientation) {
-      DeviceOrientation.portraitUp => 0,
-      DeviceOrientation.landscapeLeft => 90,
-      DeviceOrientation.portraitDown => 180,
-      DeviceOrientation.landscapeRight => 270,
-    };
+    final deviceDegrees = deviceOrientationDegrees(deviceOrientation);
     return isFrontFacing
         ? (sensorOrientation + deviceDegrees) % 360
         : (sensorOrientation - deviceDegrees + 360) % 360;
   }
+
+  static int deviceOrientationDegrees(DeviceOrientation deviceOrientation) =>
+      switch (deviceOrientation) {
+        DeviceOrientation.portraitUp => 0,
+        DeviceOrientation.landscapeLeft => 90,
+        DeviceOrientation.portraitDown => 180,
+        DeviceOrientation.landscapeRight => 270,
+      };
 
   static Offset toPreviewPoint(
     DocumentPoint point,

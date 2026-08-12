@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 
 import 'package:scana/features/scan_result/presentation/pdf_page_review_page.dart';
 import 'package:scana/features/scan_result/presentation/scan_result_viewer_page.dart';
+import 'package:scana/features/page_editor/presentation/quick_corner_edit_page.dart';
 import 'package:scana/features/scan_session/application/scan_session_manager.dart';
 import 'package:scana/models/scan_page.dart';
 import 'package:scana/models/page_correction.dart';
@@ -121,6 +122,7 @@ class _PageManagementPageState extends State<PageManagementPage> {
                   selectedPaths: _selectedPaths,
                   onToggle: _toggleSelection,
                   onOpen: (page) => _openViewer(pages, page),
+                  onEditCorners: _quickEditCorners,
                   onDelete: (page) => _deletePage(pages.indexOf(page)),
                 ),
           bottomNavigationBar: SafeArea(
@@ -230,6 +232,24 @@ class _PageManagementPageState extends State<PageManagementPage> {
     if (!mounted) return;
   }
 
+  Future<void> _quickEditCorners(ScanPage page) async {
+    final pages = widget.sessionManager.currentSession?.pages ?? const [];
+    final index = pages.indexWhere(
+      (candidate) => candidate.rawImagePath == page.rawImagePath,
+    );
+    if (index < 0) return;
+    await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(
+        builder: (context) => QuickCornerEditPage(
+          sessionManager: widget.sessionManager,
+          pageIndex: index,
+          orientationController: widget.orientationController,
+        ),
+      ),
+    );
+    if (!mounted) return;
+  }
+
   Future<void> _deletePage(int index) async {
     final pages = widget.sessionManager.currentSession?.pages ?? const [];
     if (index < 0 || index >= pages.length) return;
@@ -267,6 +287,7 @@ class _PdfSelectionGallery extends StatelessWidget {
     required this.selectedPaths,
     required this.onToggle,
     required this.onOpen,
+    required this.onEditCorners,
     required this.onDelete,
   });
 
@@ -274,6 +295,7 @@ class _PdfSelectionGallery extends StatelessWidget {
   final Set<String> selectedPaths;
   final ValueChanged<ScanPage> onToggle;
   final ValueChanged<ScanPage> onOpen;
+  final ValueChanged<ScanPage> onEditCorners;
   final ValueChanged<ScanPage> onDelete;
 
   @override
@@ -300,6 +322,7 @@ class _PdfSelectionGallery extends StatelessWidget {
             onTap: () => onToggle(page),
             onLongPress: () => onOpen(page),
             onPreview: () => onOpen(page),
+            onEditCorners: () => onEditCorners(page),
             onDelete: () => onDelete(page),
           );
         },
@@ -316,6 +339,7 @@ class _GalleryPageCard extends StatelessWidget {
     required this.onTap,
     required this.onLongPress,
     required this.onPreview,
+    required this.onEditCorners,
     required this.onDelete,
   });
 
@@ -324,6 +348,7 @@ class _GalleryPageCard extends StatelessWidget {
   final VoidCallback onTap;
   final VoidCallback onLongPress;
   final VoidCallback onPreview;
+  final VoidCallback onEditCorners;
   final VoidCallback onDelete;
 
   @override
@@ -380,6 +405,12 @@ class _GalleryPageCard extends StatelessWidget {
                     tooltip: '크게 보기',
                     onPressed: onPreview,
                     icon: const Icon(Icons.zoom_out_map, size: 20),
+                  ),
+                  IconButton(
+                    key: ValueKey('gallery-quick-corner-${page.rawImagePath}'),
+                    tooltip: '모서리 수정',
+                    onPressed: onEditCorners,
+                    icon: const Icon(Icons.crop_free, size: 20),
                   ),
                   IconButton(
                     tooltip: '페이지 삭제',

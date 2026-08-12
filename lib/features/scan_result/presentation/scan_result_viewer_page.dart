@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import 'package:scana/features/camera/presentation/camera_preview_page.dart';
 import 'package:scana/features/page_editor/presentation/page_editor_page.dart';
+import 'package:scana/features/page_editor/presentation/quick_corner_edit_page.dart';
 import 'package:scana/features/scan_result/presentation/page_management_page.dart';
 import 'package:scana/features/scan_session/application/scan_session_manager.dart';
 import 'package:scana/models/scan_page.dart';
@@ -83,6 +84,12 @@ class _ScanResultViewerPageState extends State<ScanResultViewerPage> {
             title: Text('${currentIndex + 1} / ${pages.length}'),
             actions: [
               IconButton(
+                key: const ValueKey('viewer-detailed-editor-button'),
+                tooltip: '상세 편집',
+                onPressed: () => _openDetailedEditor(currentIndex),
+                icon: const Icon(Icons.tune),
+              ),
+              IconButton(
                 key: const ValueKey('viewer-rotate-button'),
                 tooltip: '오른쪽으로 회전',
                 onPressed: () =>
@@ -120,9 +127,10 @@ class _ScanResultViewerPageState extends State<ScanResultViewerPage> {
                   const SizedBox(width: 8),
                   Expanded(
                     child: OutlinedButton.icon(
-                      onPressed: () => _edit(currentIndex),
-                      icon: const Icon(Icons.edit_outlined),
-                      label: const Text('편집'),
+                      key: const ValueKey('viewer-quick-corner-button'),
+                      onPressed: () => _quickEdit(currentIndex),
+                      icon: const Icon(Icons.crop_free),
+                      label: const Text('모서리 수정'),
                     ),
                   ),
                   const SizedBox(width: 8),
@@ -180,7 +188,7 @@ class _ScanResultViewerPageState extends State<ScanResultViewerPage> {
     }
   }
 
-  Future<void> _edit(int index) {
+  Future<void> _openDetailedEditor(int index) {
     return Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (context) => PageEditorPage(
@@ -191,6 +199,19 @@ class _ScanResultViewerPageState extends State<ScanResultViewerPage> {
         ),
       ),
     );
+  }
+
+  Future<void> _quickEdit(int index) async {
+    await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(
+        builder: (context) => QuickCornerEditPage(
+          sessionManager: widget.sessionManager,
+          pageIndex: index,
+          orientationController: widget.orientationController,
+        ),
+      ),
+    );
+    if (!mounted) return;
   }
 
   Future<void> _delete(int index) async {

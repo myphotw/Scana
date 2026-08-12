@@ -9,11 +9,13 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 import org.opencv.android.OpenCVLoader
 import org.opencv.core.CvType
+import org.opencv.core.Core
 import org.opencv.core.Mat
 import org.opencv.core.MatOfPoint
 import org.opencv.core.MatOfPoint2f
 import org.opencv.core.Point
 import org.opencv.core.Rect
+import org.opencv.core.Scalar
 import org.opencv.core.Size
 import org.opencv.imgcodecs.Imgcodecs
 import org.opencv.imgproc.Imgproc
@@ -26,8 +28,7 @@ object OpenCvDocumentDetector {
     private const val MIN_AREA_RATIO = 0.12
     private const val MIN_CANDIDATE_SCORE = 0.32
     private const val MIN_BOUNDARY_CONFIDENCE = 0.38
-    private const val MIN_PREVIEW_CANDIDATE_SCORE = 0.22
-    private const val MIN_PREVIEW_BOUNDARY_CONFIDENCE = 0.22
+    private const val MIN_PREVIEW_CANDIDATE_SCORE = 0.08
     private const val MAX_ASPECT_RATIO = 8.0
     private const val BOUNDARY_SAMPLE_COUNT = 24
 
@@ -60,6 +61,9 @@ object OpenCvDocumentDetector {
         val brightnessMask = Mat()
         val brightnessHierarchy = Mat()
         val brightnessContours = mutableListOf<MatOfPoint>()
+        val paperMask = Mat()
+        val paperHierarchy = Mat()
+        val paperContours = mutableListOf<MatOfPoint>()
 
         try {
             if (scale < 1.0) {
@@ -105,11 +109,20 @@ object OpenCvDocumentDetector {
                 Imgproc.RETR_LIST,
                 Imgproc.CHAIN_APPROX_SIMPLE,
             )
+            buildPaperMask(resized, paperMask)
+            Imgproc.findContours(
+                paperMask,
+                paperContours,
+                paperHierarchy,
+                Imgproc.RETR_EXTERNAL,
+                Imgproc.CHAIN_APPROX_SIMPLE,
+            )
 
             val imageArea = resized.cols().toDouble() * resized.rows().toDouble()
             val longLines = collectLongLines(edges, resized.size())
             val spine = detectSpine(blurred, longLines)
             val contentEnvelope = contentEnvelope(edges, pageSide)
+            val contentSafe = analyzeContentSafeCrop(gray, pageSide)
             val baseCandidates =
                 (contours.asSequence() + brightnessContours.asSequence())
                     .asSequence()
@@ -129,8 +142,24 @@ object OpenCvDocumentDetector {
                         )
                     }
                     .toList()
+            val paperCandidates = paperContours
+                .asSequence()
+                .sortedByDescending { Imgproc.contourArea(it) }
+                .take(12)
+                .mapNotNull {
+                    evaluatePaperRegionCandidate(
+                        it,
+                        resized.size(),
+                        imageArea,
+                        blurred,
+                        edges,
+                        contentEnvelope,
+                        pageSide,
+                    )
+                }
+                .toList()
             val candidates = if (pageSide == null) {
-                baseCandidates + baseCandidates.flatMap { candidate ->
+                baseCandidates + paperCandidates + baseCandidates.flatMap { candidate ->
                     splitOpenBookCandidate(
                         candidate,
                         spine,
@@ -141,7 +170,7 @@ object OpenCvDocumentDetector {
                     )
                 }
             } else {
-                baseCandidates + listOfNotNull(
+                baseCandidates + paperCandidates + listOfNotNull(
                     spreadPriorCandidate(
                         blurred,
                         edges,
@@ -159,7 +188,10 @@ object OpenCvDocumentDetector {
                 }
             val best = selectConservativeCandidate(eligible, imageArea)
             logCandidates(candidates, pageSide, debugLogging, best)
-            if (best == null) return notDetected(sourceWidth, sourceHeight)
+            if (best == null) {
+                return notDetected(sourceWidth, sourceHeight) +
+                    contentSafeResult(contentSafe, scale)
+            }
             val ordered = orderCorners(best.points).map { point ->
                 Point(point.x / scale, point.y / scale)
             }
@@ -180,12 +212,16 @@ object OpenCvDocumentDetector {
                     best.spineSide,
                     best.clippingEvidence,
                 ),
-            )
+                "paperRegionCandidate" to (best.origin == CandidateOrigin.paperRegion),
+            ) + contentSafeResult(contentSafe, scale)
         } catch (_: Exception) {
             return notDetected(sourceWidth, sourceHeight)
         } finally {
             contours.forEach(Mat::release)
             brightnessContours.forEach(Mat::release)
+            paperContours.forEach(Mat::release)
+            paperHierarchy.release()
+            paperMask.release()
             brightnessHierarchy.release()
             brightnessMask.release()
             hierarchy.release()
@@ -390,10 +426,7 @@ object OpenCvDocumentDetector {
                         resized.size(),
                         imageArea,
                     )
-                }).filter {
-                    it.score >= MIN_PREVIEW_CANDIDATE_SCORE &&
-                        it.confidence >= MIN_PREVIEW_BOUNDARY_CONFIDENCE
-                }
+                }).filter { it.score >= MIN_PREVIEW_CANDIDATE_SCORE }
                     .maxByOrNull { it.score }
                     ?: return notDetected(width, height)
             val ordered = orderCorners(best.points).map { Point(it.x / scale, it.y / scale) }
@@ -428,6 +461,324 @@ object OpenCvDocumentDetector {
             resized.release()
             sourceGray.release()
         }
+    }
+
+    /**
+     * Builds a broad paper prior from luminance and chroma. The adaptive branch
+     * preserves shaded/yellow pages while morphology closes holes made by text,
+     * staff lines, tables, and colour printing.
+     */
+    private fun buildPaperMask(source: Mat, output: Mat) {
+        val lab = Mat()
+        val channels = mutableListOf<Mat>()
+        val globalBright = Mat()
+        val localBright = Mat()
+        val brightnessPrior = Mat()
+        val lowChroma = Mat()
+        try {
+            Imgproc.cvtColor(source, lab, Imgproc.COLOR_BGR2Lab)
+            Core.split(lab, channels)
+            val luminance = channels[0]
+            Imgproc.threshold(
+                luminance,
+                globalBright,
+                0.0,
+                255.0,
+                Imgproc.THRESH_BINARY or Imgproc.THRESH_OTSU,
+            )
+            val shortest = min(source.cols(), source.rows()).coerceAtLeast(3)
+            var blockSize = (shortest * 0.055).roundToInt().coerceIn(15, 51)
+            if (blockSize % 2 == 0) blockSize += 1
+            Imgproc.adaptiveThreshold(
+                luminance,
+                localBright,
+                255.0,
+                Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C,
+                Imgproc.THRESH_BINARY,
+                blockSize,
+                8.0,
+            )
+            Core.bitwise_or(globalBright, localBright, brightnessPrior)
+            Core.inRange(
+                lab,
+                Scalar(0.0, 72.0, 68.0),
+                Scalar(255.0, 194.0, 207.0),
+                lowChroma,
+            )
+            Core.bitwise_and(brightnessPrior, lowChroma, output)
+
+            var closeSize = (shortest * 0.025).roundToInt().coerceIn(9, 31)
+            if (closeSize % 2 == 0) closeSize += 1
+            val closeKernel = Imgproc.getStructuringElement(
+                Imgproc.MORPH_RECT,
+                Size(closeSize.toDouble(), closeSize.toDouble()),
+            )
+            val openKernel = Imgproc.getStructuringElement(
+                Imgproc.MORPH_ELLIPSE,
+                Size(5.0, 5.0),
+            )
+            try {
+                Imgproc.morphologyEx(output, output, Imgproc.MORPH_CLOSE, closeKernel)
+                Imgproc.morphologyEx(output, output, Imgproc.MORPH_OPEN, openKernel)
+            } finally {
+                openKernel.release()
+                closeKernel.release()
+            }
+        } finally {
+            lowChroma.release()
+            brightnessPrior.release()
+            localBright.release()
+            globalBright.release()
+            channels.forEach(Mat::release)
+            lab.release()
+        }
+    }
+
+    private fun evaluatePaperRegionCandidate(
+        contour: MatOfPoint,
+        imageSize: Size,
+        imageArea: Double,
+        gray: Mat,
+        edges: Mat,
+        contentEnvelope: ContentEnvelope,
+        pageSide: PageSide?,
+    ): Candidate? {
+        val contour2f = MatOfPoint2f(*contour.toArray())
+        val approximation = MatOfPoint2f()
+        try {
+            val contourArea = abs(Imgproc.contourArea(contour))
+            val areaRatio = contourArea / imageArea
+            if (areaRatio < if (pageSide == null) 0.20 else 0.24) return null
+            val perimeter = Imgproc.arcLength(contour2f, true)
+            Imgproc.approxPolyDP(contour2f, approximation, perimeter * 0.018, true)
+            val approximationPoints = approximation.toArray()
+            if (approximationPoints.size !in 4..28) return null
+            val points = if (approximationPoints.size == 4) {
+                approximationPoints
+            } else {
+                representativeCorners(approximationPoints)
+            }
+            val ordered = orderCorners(points).toTypedArray()
+            val widthRatio =
+                (ordered.maxOf { it.x } - ordered.minOf { it.x }) / imageSize.width
+            val heightRatio =
+                (ordered.maxOf { it.y } - ordered.minOf { it.y }) / imageSize.height
+            val minimumWidth = if (pageSide == null) 0.46 else 0.42
+            if (widthRatio < minimumWidth || heightRatio < 0.48) {
+                return null
+            }
+            val shortSide = min(widthRatio, heightRatio).coerceAtLeast(0.001)
+            val aspect = max(widthRatio, heightRatio) / shortSide
+            if (aspect > MAX_ASPECT_RATIO) return null
+
+            val envelopeContainment = contentEnvelope.containmentFor(ordered)
+            if (envelopeContainment < 0.78) return null
+            val region = regionSignals(ordered, gray, edges)
+            val contrast = brightnessBoundaryScore(ordered, gray)
+            val paperScore = paperInteriorScore(region)
+            val rectangularity = rightAngleScore(ordered)
+            val center = Point(imageSize.width / 2.0, imageSize.height / 2.0)
+            val centerCoverage = if (pointInsidePolygon(center, ordered)) 1.0 else 0.25
+            val borderProximity = borderProximityScore(ordered, imageSize, pageSide)
+            val occupancy = occupancyScore(polygonArea(ordered) / imageArea, pageSide)
+            val sideScore = pageSidePolicyScore(ordered, pageSide, imageSize, emptyList())
+            val score =
+                occupancy * 0.26 +
+                    paperScore * 0.22 +
+                    contrast * 0.14 +
+                    rectangularity * 0.10 +
+                    centerCoverage * 0.09 +
+                    borderProximity * 0.09 +
+                    envelopeContainment * 0.06 +
+                    sideScore * 0.04
+            val confidence = (
+                paperScore * 0.29 +
+                    contrast * 0.21 +
+                    occupancy * 0.20 +
+                    rectangularity * 0.12 +
+                    centerCoverage * 0.10 +
+                    envelopeContainment * 0.08
+                ).coerceIn(0.0, 1.0)
+            return Candidate(
+                points = ordered,
+                contourPoints = contour.toArray(),
+                score = score,
+                confidence = confidence,
+                kind = if (pageSide == null) CandidateKind.document else CandidateKind.bookPage,
+                spineSide = pageSide?.spineSide,
+                clippingEvidence = contourClippingEvidence(contour.toArray(), imageSize),
+                debugScores = CandidateDebugScores(
+                    occupancy = occupancy,
+                    borderProximity = borderProximity,
+                    insideOutsideContrast = contrast,
+                    paperScore = paperScore,
+                    rectangularity = rectangularity,
+                    edgeContinuity = 1.0,
+                    contentContainment = envelopeContainment,
+                    widthRatio = widthRatio,
+                    heightRatio = heightRatio,
+                    areaRatio = areaRatio,
+                ),
+                origin = CandidateOrigin.paperRegion,
+            )
+        } finally {
+            approximation.release()
+            contour2f.release()
+        }
+    }
+
+    /** Foreground-only safety crop used only when a paper boundary is weak. */
+    private fun analyzeContentSafeCrop(gray: Mat, pageSide: PageSide?): ContentSafeAnalysis? {
+        val foreground = Mat()
+        val hierarchy = Mat()
+        val contours = mutableListOf<MatOfPoint>()
+        try {
+            Imgproc.adaptiveThreshold(
+                gray,
+                foreground,
+                255.0,
+                Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C,
+                Imgproc.THRESH_BINARY_INV,
+                31,
+                13.0,
+            )
+            val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(2.0, 2.0))
+            try {
+                Imgproc.morphologyEx(foreground, foreground, Imgproc.MORPH_OPEN, kernel)
+            } finally {
+                kernel.release()
+            }
+            Imgproc.findContours(
+                foreground,
+                contours,
+                hierarchy,
+                Imgproc.RETR_EXTERNAL,
+                Imgproc.CHAIN_APPROX_SIMPLE,
+            )
+            val width = gray.cols()
+            val height = gray.rows()
+            val imageArea = width.toDouble() * height
+            val sideStart = if (pageSide == PageSide.right) width * 0.12 else width * 0.01
+            val sideEnd = if (pageSide == PageSide.left) width * 0.88 else width * 0.99
+            val components = contours.mapNotNull { contour ->
+                val bounds = Imgproc.boundingRect(contour)
+                val area = abs(Imgproc.contourArea(contour))
+                val boxArea = bounds.width.toDouble() * bounds.height
+                val centerX = bounds.x + bounds.width / 2.0
+                val textOrLineLike =
+                    bounds.height <= height * 0.14 && bounds.width <= width * 0.72
+                val compactGraphic =
+                    bounds.height <= height * 0.24 && bounds.width <= width * 0.28
+                val accepted = bounds.width >= 2 && bounds.height >= 2 &&
+                    area >= 3.0 && boxArea <= imageArea * 0.08 &&
+                    centerX in sideStart..sideEnd &&
+                    (textOrLineLike || compactGraphic)
+                if (accepted) bounds else null
+            }
+            if (components.size < 10 || components.size > 2500) return null
+
+            val minX = components.minOf { it.x }
+            val minY = components.minOf { it.y }
+            val maxX = components.maxOf { it.x + it.width }
+            val maxY = components.maxOf { it.y + it.height }
+            val contentWidth = maxX - minX
+            val contentHeight = maxY - minY
+            if (contentWidth < width * 0.24 || contentHeight < height * 0.28) return null
+            val foregroundArea = components.sumOf { it.width.toDouble() * it.height }
+            val envelopeArea = contentWidth.toDouble() * contentHeight
+            val density = foregroundArea / envelopeArea.coerceAtLeast(1.0)
+            if (density < 0.003 || density > 0.34) return null
+
+            val marginX = max(contentWidth * 0.14, width * 0.06)
+            val marginY = max(contentHeight * 0.16, height * 0.06)
+            var safeLeft = minX - marginX
+            var safeRight = maxX + marginX
+            var safeTop = minY - marginY
+            var safeBottom = maxY + marginY
+            val minimumWidth = width * 0.72
+            val minimumHeight = height * 0.72
+            if (safeRight - safeLeft < minimumWidth) {
+                val center = (safeLeft + safeRight) / 2.0
+                safeLeft = center - minimumWidth / 2.0
+                safeRight = center + minimumWidth / 2.0
+            }
+            if (safeBottom - safeTop < minimumHeight) {
+                val center = (safeTop + safeBottom) / 2.0
+                safeTop = center - minimumHeight / 2.0
+                safeBottom = center + minimumHeight / 2.0
+            }
+            if (safeLeft < 0) {
+                safeRight -= safeLeft
+                safeLeft = 0.0
+            }
+            if (safeRight > width) {
+                safeLeft -= safeRight - width
+                safeRight = width.toDouble()
+            }
+            if (safeTop < 0) {
+                safeBottom -= safeTop
+                safeTop = 0.0
+            }
+            if (safeBottom > height) {
+                safeTop -= safeBottom - height
+                safeBottom = height.toDouble()
+            }
+            safeLeft = safeLeft.coerceIn(0.0, width.toDouble())
+            safeRight = safeRight.coerceIn(0.0, width.toDouble())
+            safeTop = safeTop.coerceIn(0.0, height.toDouble())
+            safeBottom = safeBottom.coerceIn(0.0, height.toDouble())
+            val safeCorners = rectCorners(safeLeft, safeTop, safeRight, safeBottom)
+            val contentBounds = rectCorners(
+                minX.toDouble(),
+                minY.toDouble(),
+                maxX.toDouble(),
+                maxY.toDouble(),
+            )
+            val distribution = min(contentWidth / width.toDouble(), contentHeight / height.toDouble())
+            val countScore = (components.size / 80.0).coerceIn(0.0, 1.0)
+            val confidence = (distribution * 0.56 + countScore * 0.30 +
+                (1.0 - abs(density - 0.10) / 0.24).coerceIn(0.0, 1.0) * 0.14)
+                .coerceIn(0.0, 1.0)
+            return ContentSafeAnalysis(
+                safeCorners = safeCorners,
+                contentBounds = contentBounds,
+                confidence = confidence,
+                componentCount = components.size,
+                marginXRatio = marginX / width,
+                marginYRatio = marginY / height,
+            )
+        } finally {
+            contours.forEach(Mat::release)
+            hierarchy.release()
+            foreground.release()
+        }
+    }
+
+    private fun rectCorners(left: Double, top: Double, right: Double, bottom: Double) =
+        arrayOf(Point(left, top), Point(right, top), Point(right, bottom), Point(left, bottom))
+
+    private fun contentSafeResult(
+        analysis: ContentSafeAnalysis?,
+        scale: Double,
+    ): Map<String, Any> {
+        if (analysis == null) {
+            return mapOf(
+                "contentSafeConfidence" to 0.0,
+                "contentComponentCount" to 0,
+                "contentSafeMarginX" to 0.0,
+                "contentSafeMarginY" to 0.0,
+            )
+        }
+        fun sourcePoints(points: Array<Point>) =
+            points.map { pointMap(Point(it.x / scale, it.y / scale)) }
+        return mapOf(
+            "contentSafeCorners" to sourcePoints(analysis.safeCorners),
+            "contentBounds" to sourcePoints(analysis.contentBounds),
+            "contentSafeConfidence" to analysis.confidence,
+            "contentComponentCount" to analysis.componentCount,
+            "contentSafeMarginX" to analysis.marginXRatio,
+            "contentSafeMarginY" to analysis.marginYRatio,
+        )
     }
 
     private fun evaluateCandidate(
@@ -2002,6 +2353,18 @@ object OpenCvDocumentDetector {
         val spineSide: SpineSide?,
         val clippingEvidence: Double,
         val debugScores: CandidateDebugScores = CandidateDebugScores(),
+        val origin: CandidateOrigin = CandidateOrigin.edgeBoundary,
+    )
+
+    private enum class CandidateOrigin { edgeBoundary, paperRegion }
+
+    private data class ContentSafeAnalysis(
+        val safeCorners: Array<Point>,
+        val contentBounds: Array<Point>,
+        val confidence: Double,
+        val componentCount: Int,
+        val marginXRatio: Double,
+        val marginYRatio: Double,
     )
 
     private data class LineSegment(val start: Point, val end: Point)

@@ -1,5 +1,56 @@
 ﻿# 로드맵
 
+## AI-PoC 4 + Quick Corner Edit fallback
+
+- AI Raw의 page-sized extent·center·bottom proximity를 평가해 본문 박스/표 같은 partial region을 명시적으로 거부한다.
+- 각 edge의 transition, continuity, ownership, adjacent, occlusion 증거에 따라 outward expansion을 독립 제한하고, 두 번째 paper component를 adjacent page evidence로 사용한다.
+- Hard reject status와 `accepted_conservative`를 DEBUG 비교에 남기고 Single/Spread 실제 책으로 primary 전환 여부를 마지막 판단한다.
+- Gallery/Viewer/PDF Review의 보이는 모서리 수정 action에서 경량 4-corner 화면을 열고 AI Refined → AI Raw → OpenCV → final → guide 초기값을 제공한다.
+- 확대경/crosshair와 pinch zoom/pan을 지원하고 적용 시 manual source 영속화, Perspective 및 현재 Enhancement 재생성 후 원래 위치로 복귀한다.
+- 실사용이 여전히 불안정하면 자동 튜닝을 중단하고 Quick Corner Edit를 공식 fallback으로 유지한다.
+
+## AI-PoC 3 — AI Refined Boundary Stabilization
+
+- AI mask dilation ownership prior, centroid/component intersection으로 main page를 고정한다.
+- 면적 성장·spine overshoot·narrow connection valley로 adjacent page penalty를 계산한다.
+- Contour projection 88 percentile outer envelope와 MAD/trimmed fitting으로 curved margin을 보존하고 occlusion outlier를 제외한다.
+- 하단 partial occlusion은 raw/envelope geometry로 복구하고 outer/top/bottom anchor가 충분하면 약한 spine edge를 허용한다.
+- Explicit refine status/confidence와 envelope overlay를 실기기 비교에 사용하되 production primary 전환은 별도 결정한다.
+
+## AI-PoC 2 — AI Segmentation + Paper Edge Refinement
+
+- FairScan mask를 최종 crop이 아니라 문서 search prior로 사용하고 비율 확장 ROI 안에서 실제 paper/background transition을 찾는다.
+- LAB paper-like component를 AI overlap·centroid ownership·면적 증가 제한으로 평가하고, 각 변을 outward 우선 탐색한다.
+- AI foreground containment, convex ordering, 과도한 축소/확장 제한을 통과한 refined boundary만 DEBUG 비교 결과로 채택한다.
+- Single과 Spread left/right ROI를 독립 처리하되 spine 방향 탐색 폭을 제한해 인접 페이지 병합을 방지한다.
+- OpenCV / AI Raw / AI Refined 실기기 비교에서 실제 종이 여백·곡선 외곽·페이지 번호 포함 여부를 확인한 뒤 primary 전환 여부를 결정한다.
+
+## AI-PoC 1 — FairScan TFLite Document Segmentation 비교
+
+- FairScan v1.2.0 document segmentation model을 APK asset으로 포함하고 LiteRT CPU에서 완전 오프라인 실행한다.
+- 기존 Q1.3/OpenCV crop을 교체하지 않고 같은 raw JPEG의 AI mask·corners·timing을 병렬 진단 결과로 수집한다.
+- Single 전체 이미지 및 Spread left/right ROI를 독립 처리한다.
+- DEBUG에서 raw, mask, AI overlay, OpenCV overlay를 세션 `debug_ai/`에 저장하고 Page Editor에서 비교한다.
+- 실제 입문책 재촬영으로 페이지 전체 포함, 책상 배제, 내부선 내성, Single/Spread 정확도와 처리시간을 비교한 뒤 primary detector 전환 여부를 별도로 결정한다.
+
+## Q1.3 — WYSIWYG Capture Boundary
+
+- 셔터 순간 화면에 표시된 sane live boundary를 analysis-frame 좌표의 immutable snapshot으로 고정한다.
+- UI preview 좌표를 역산하지 않고 sensor/device/JPEG 회전을 반영해 full-resolution JPEG 좌표로 직접 변환한다.
+- Capture boundary를 최우선 crop으로 사용하며 high-resolution 검출은 2~5% 범위의 제한적 refinement로만 허용한다.
+- 과도한 corner 이동, 안쪽 축소, 면적·폭·높이 감소는 거부하고 capture boundary를 보호한다.
+- Live boundary가 없을 때만 `High-res Paper → Content Safe → Guide` Q1.2 fallback을 사용한다.
+- Spread 좌/우 snapshot, 좌표 변환, crop source와 실패 fallback을 서로 독립 처리한다.
+- `CAPTURE_BOUNDARY` 진단 및 session metadata로 Overlay와 결과 차이를 추적한다.
+
+## Q1.2 — Multi-stage Page Crop Strategy
+
+- Q1.3 capture snapshot이 없는 경우 최종 crop을 `High-res Paper Boundary → Content Safe Crop → Guide Fallback` 순서로 결정한다.
+- LAB luminance/chroma와 local brightness, morphology, connected region으로 edge보다 종이 덩어리를 우선하는 후보 경로를 추가한다.
+- paper 검출 실패 시 충분한 foreground component bounds에 반응형 안전 여백을 적용하고, sparse/blank/불확실한 사진 페이지는 guide로 넘긴다.
+- Live overlay는 최종 crop confidence와 분리해 낮은 best candidate도 표시하며 Spread 좌/우를 독립 표시한다.
+- `CropSource`, `CROP_DECISION`, `LIVE_GUIDE` 진단으로 실기기 튜닝 근거를 보존한다.
+
 ## Q1.1 검증
 
 - Camera에서 unstable/stable live boundary 표시 및 Portrait/Spread 좌표 확인

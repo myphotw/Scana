@@ -1,6 +1,8 @@
 import 'package:flutter/services.dart';
 
 import 'package:scana/models/scan_page.dart';
+import 'package:scana/models/page_boundary.dart';
+import 'package:scana/models/document_geometry.dart';
 import 'package:scana/services/image_processing/document_detector.dart';
 
 /// Geometry policy for a manually aligned, two-page book capture.
@@ -34,6 +36,28 @@ class SpreadCaptureRoiPolicy {
         width: width - rightStart,
         height: height,
       ),
+    );
+  }
+
+  /// Converts a normalized full-frame live boundary into the normalized
+  /// coordinate space of the saved left/right overlap ROI.
+  static PageBoundary toRoiBoundary(
+    PageBoundary fullFrameBoundary,
+    DocumentPageSide side, {
+    double overlap = overlapFraction,
+  }) {
+    final halfOverlap = overlap / 2;
+    final start = side == DocumentPageSide.left ? 0.0 : 0.5 - halfOverlap;
+    final end = side == DocumentPageSide.left ? 0.5 + halfOverlap : 1.0;
+    final width = end - start;
+    final normalized = fullFrameBoundary.normalized();
+    return normalized.mapPoints(
+      (point) => DocumentPoint(
+        ((point.x - start) / width).clamp(0.0, 1.0),
+        point.y.clamp(0.0, 1.0),
+      ),
+      sourceWidth: 1,
+      sourceHeight: 1,
     );
   }
 }

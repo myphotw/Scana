@@ -14,6 +14,8 @@
 | pdf 3.13.0 | 기기 내부 PDF 문서·이미지 페이지 생성 | Apache License 2.0 |
 | uuid 4.6.0 | ScanSession ID 생성 | MIT |
 | OpenCV Android AAR 4.13.0 (`org.opencv:opencv`) | 오프라인 문서 검출, 원근 변환, 곡면 remap, Scan Color·Grayscale·Black & White 화질 보정 | Apache License 2.0 |
+| LiteRT 1.4.1 (`com.google.ai.edge.litert:litert`) | FairScan segmentation TFLite CPU/XNNPACK 오프라인 추론 | Apache License 2.0 |
+| FairScan Document Segmentation Model v1.2.0 | AI-PoC 문서 probability mask 생성, DeepLabV3Plus + MobileNetV2, dynamic-range quantized TFLite | GNU GPL v3 |
 | Google ML Kit Text Recognition Korean 16.0.1 (`com.google.mlkit:text-recognition-korean`) | bundled 기기 내 한국어 OCR·PDF 제목 제안 | Google ML Kit Terms / Google APIs Terms (비 오픈소스 SDK) |
 
 ## 도입 규칙
@@ -44,3 +46,25 @@ Google ML Kit Text Recognition v2 Korean 16.0.1은 Android 앱에 모델을 정�
 M6에서는 새 외부 라이브러리를 추가하지 않고 M5에서 도입한 OpenCV 4.13.0을 재사용한다.
 
 M8 화질 보정도 새 외부 라이브러리를 추가하지 않고 기존 OpenCV 4.13.0과 Flutter/Dart 표준 기능만 재사용한다. 따라서 추가 라이선스 고지 대상은 없다.
+
+## AI-PoC 1 FairScan Segmentation
+
+PoC는 `pynicolas/fairscan-segmentation-model`의 공식 v1.2.0 release asset을 저장소에 명시적으로 포함한다. 빌드 또는 런타임 자동 다운로드를 사용하지 않으며 Android `INTERNET` permission을 추가하지 않는다.
+
+- 모델 파일: `android/app/src/main/assets/models/fairscan_document_segmentation.tflite`
+- 버전/tag: `v1.2.0` (`78cde68`, dataset v2.1 release)
+- 파일 크기: 4,921,040 bytes
+- SHA-256: `96E14D7E610DD0C27B768B228FBC553B4EC119EBE68F3A3594029A25400691D2`
+- 구조: DeepLabV3Plus, MobileNetV2 encoder, 256×256 RGB binary document segmentation
+- 형식: dynamic-range quantized TFLite, FLOAT32 input/output interface
+- 라이선스: GNU General Public License v3
+- 모델 저장소: https://github.com/pynicolas/fairscan-segmentation-model
+- 공식 release: https://github.com/pynicolas/fairscan-segmentation-model/releases/tag/v1.2.0
+- FairScan 참고 구현: https://github.com/pynicolas/FairScan
+
+FairScan 앱의 LiteRT 사용 방식과 preprocessing/mask decoding만 검토했으며 앱 전체 소스는 복사하지 않았다. Scana의 segmenter와 post-processing은 기존 OpenCV 계층에 맞게 별도로 작성했다. FairScan 모델이 GPL-3.0이므로 이 모델을 포함한 APK를 외부 배포할 때는 앱 전체의 GPL 호환성과 해당 소스 제공 의무를 제품 배포 전에 반드시 법률·라이선스 관점에서 확인해야 한다.
+
+LiteRT 1.4.1은 Google AI Edge의 Android runtime artifact를 사용한다. 모델과 runtime이 APK에 포함되어 기기 내 CPU/XNNPACK으로 실행되며 API key, cloud service, runtime model download가 없다.
+
+- LiteRT 공식 저장소: https://github.com/google-ai-edge/LiteRT
+- Maven artifact: https://central.sonatype.com/artifact/com.google.ai.edge.litert/litert/1.4.1

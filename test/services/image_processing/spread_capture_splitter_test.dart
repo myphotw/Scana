@@ -4,6 +4,7 @@ import 'package:scana/services/image_processing/spread_capture_splitter.dart';
 import 'package:scana/services/image_processing/document_detector.dart';
 import 'package:scana/models/document_geometry.dart';
 import 'package:scana/models/scan_page.dart';
+import 'package:scana/models/page_boundary.dart';
 
 void main() {
   test('calculates overlap ROI geometry around the manual center guide', () {
@@ -65,4 +66,39 @@ void main() {
 
     expect(SpreadPageDetectionPolicy.isStableDetection(page), isFalse);
   });
+
+  test('maps full-frame left live boundary into left overlap ROI', () {
+    final mapped = SpreadCaptureRoiPolicy.toRoiBoundary(
+      _fullBoundary(0.05, 0.50),
+      DocumentPageSide.left,
+    );
+
+    expect(mapped.toDocumentCorners().topLeft.x, closeTo(0.05 / 0.55, 0.001));
+    expect(mapped.toDocumentCorners().topRight.x, closeTo(0.50 / 0.55, 0.001));
+  });
+
+  test('maps full-frame right live boundary into right overlap ROI', () {
+    final mapped = SpreadCaptureRoiPolicy.toRoiBoundary(
+      _fullBoundary(0.50, 0.95),
+      DocumentPageSide.right,
+    );
+
+    expect(mapped.toDocumentCorners().topLeft.x, closeTo(0.05 / 0.55, 0.001));
+    expect(mapped.toDocumentCorners().topRight.x, closeTo(0.50 / 0.55, 0.001));
+  });
 }
+
+PageBoundary _fullBoundary(double left, double right) =>
+    PageBoundary.fromCorners(
+      DocumentCorners(
+        topLeft: DocumentPoint(left, 0.1),
+        topRight: DocumentPoint(right, 0.1),
+        bottomRight: DocumentPoint(right, 0.9),
+        bottomLeft: DocumentPoint(left, 0.9),
+      ),
+      sourceWidth: 1,
+      sourceHeight: 1,
+      confidence: 0.8,
+      stability: 1,
+      timestamp: DateTime.utc(2026, 8, 12),
+    );
