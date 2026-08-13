@@ -1,12 +1,21 @@
 ﻿# 로드맵
 
+## Scana V1 — AI Primary Crop + Quick Corner Edit
+
+- FairScan AI Final을 production primary crop으로 사용하고 `AI Refined → AI Hybrid → AI Raw safety fallback → OpenCV/Q1.x → Guide` 순서를 유지한다.
+- 네 변의 transition/support/border distance/occlusion을 독립 기록하고 Unknown Edge를 inward edge로 해석하지 않는다.
+- 하단 아래 전경·edge·paper-like 연속성을 검사해 페이지 번호와 하단 여백을 우선 보존한다.
+- 실제 Perspective 입력과 DEBUG `AI Final`, `ScanPage.documentCorners`를 동일하게 유지한다.
+- Quick Corner Edit는 현재 final crop에서 시작하며 적용 시 manual source를 영속화하고 Perspective→자동 곡률 분석→조건부 Curved Dewarp→Enhancement 전체를 재실행한다.
+- 다음 단계는 Single/Spread 실제 책, 손가락 가림, 화면 밖 외곽 샘플에서 안전 여백과 fallback 품질을 검증하는 것이다.
+
 ## AI-PoC 4 + Quick Corner Edit fallback
 
 - AI Raw의 page-sized extent·center·bottom proximity를 평가해 본문 박스/표 같은 partial region을 명시적으로 거부한다.
 - 각 edge의 transition, continuity, ownership, adjacent, occlusion 증거에 따라 outward expansion을 독립 제한하고, 두 번째 paper component를 adjacent page evidence로 사용한다.
 - Hard reject status와 `accepted_conservative`를 DEBUG 비교에 남기고 Single/Spread 실제 책으로 primary 전환 여부를 마지막 판단한다.
-- Gallery/Viewer/PDF Review의 보이는 모서리 수정 action에서 경량 4-corner 화면을 열고 AI Refined → AI Raw → OpenCV → final → guide 초기값을 제공한다.
-- 확대경/crosshair와 pinch zoom/pan을 지원하고 적용 시 manual source 영속화, Perspective 및 현재 Enhancement 재생성 후 원래 위치로 복귀한다.
+- Gallery/Viewer/PDF Review의 보이는 모서리 수정 action에서 경량 4-corner 화면을 열고 현재 실제 final crop을 초기값으로 제공한다.
+- source/viewport의 BoxFit.contain rect를 고정하고 pan/zoom 없이 44dp hit target의 네 corner만 이동한다. 시야를 가리는 확대경 없이 적용 시 manual source 영속화, Perspective 및 현재 Enhancement 재생성 후 원래 위치로 복귀한다.
 - 실사용이 여전히 불안정하면 자동 튜닝을 중단하고 Quick Corner Edit를 공식 fallback으로 유지한다.
 
 ## AI-PoC 3 — AI Refined Boundary Stabilization
@@ -81,6 +90,23 @@ OpenCV 기반 촬영 이미지 문서 검출, 모서리 Overlay, 수동 Corner �
 ## M6 — Perspective Correction & Page Flattening
 
 OpenCV 원근 변환, 경계/inset 기반의 보수적 곡면 평탄화, Guide Corner 영속화와 연속 촬영·Scan Document List·Viewer 중심 UX를 구현한다.
+
+### V1 Stabilization
+
+- Curved 입력을 Perspective rectified 좌표계로 고정하고 출력 canvas/luminance 검증과 Perspective fallback 재화질보정을 적용한다.
+- Camera 고정 Single/Spread guide를 AI live boundary 아래에 복원하고 Camera DEBUG 버튼은 제거한다.
+- Quick Corner 이미지를 불변 contain rect로 고정하고 모든 pan/zoom gesture를 제거해 corner-only 보정 UX로 마감한다.
+- Curved confidence의 coverage/evidence/consistency와 구체 rejection reason을 DEBUG/session metadata에 남기되 전체 threshold 0.68은 낮추지 않는다.
+- 자동 correction pipeline을 Capture와 Quick Corner, Spread Left/Right에 공통 적용한다. 곡률 크기와 evidence 품질을 분리해 FLAT/MILD/STRONG/UNRELIABLE로 분류하고 mild는 55% strength, strong은 full strength로 처리한다.
+- Curved 출력은 geometry/deformation/straightness 개선 검증 후에만 채택한다. 거부 또는 불확실 상태는 Perspective+Enhancement 정상 결과로 완료하고 기술 오류를 사용자에게 노출하지 않는다.
+- Curved Dewarp Final Pass는 AI refinement의 기존 owned paper contour를 top/bottom/spine evidence로 재사용하고 text/staff evidence와 방향별로 fusion한다. Geometry 두 신호 또는 geometry+internal 동방향 조합은 MILD 후보가 될 수 있지만 충돌 신호는 UNRELIABLE로 격리한다.
+- V1 acceptance는 최근 얇은 책에서 일부 MILD가 실제 적용되어 page geometry 또는 baseline이 개선되고, 평면 A4는 FLAT을 유지하며, DEBUG curvature report가 모든 미적용 원인을 구체적으로 설명하는 것이다. Strength 55%, STRONG 0.68, M8.1 0.17/0.20/0.07 값은 유지한다.
+- Quick Corner 확대경을 제거하고 Gallery 액션을 thumbnail 아래 반응형 compact row로 분리한다.
+- corrected/enhanced 중간 결과를 full-resolution PNG로 전환해 누적 JPEG 재압축을 제거하고 기존 JPEG session 호환을 유지한다.
+- Foreground-first source 72%/3×3·9×9 detail/black-hat 실험은 종이 질감과 비침을 증폭한 회귀로 철회한다. Scan Color는 M8.1의 paper-aware normalization, soft whitening, 보수적 5×5 text mask를 유지하며 최종 가독성 값은 edge-local sharpening 17%, foreground darkening 20%, source blend 7%로 동결 후보화한다.
+- `debug_quality` 단계 artifact와 전체/foreground sharpness, background variance/dark speckle ratio, format/bytes/PDF source report로 같은 글자의 RAW→Perspective→Enhanced 손실 및 speckle 증가를 실기기에서 비교한다.
+- Viewer와 PDF는 동일 full-resolution `displayImagePath`를 사용하며 thumbnail 또는 PDF pre-resize를 허용하지 않는다.
+- 동일 책 페이지에서 자연스러운 stroke, 낮은 halo/눈 피로, 안정된 배경을 승인하면 이미지 품질 튜닝을 종료하고 V1 UI Cleanup으로 전환한다. 다음 범위는 DEBUG/AI 비교 메뉴, 개발용 버튼, 중복 편집 진입점, Page Editor와 Camera·Gallery·PDF Review의 사용자 명칭·아이콘·간격 정리다.
 
 ## M7 — PDF Export & Scan Document Workflow
 

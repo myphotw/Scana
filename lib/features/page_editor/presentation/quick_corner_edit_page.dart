@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
@@ -27,16 +26,11 @@ class QuickCornerEditPage extends StatefulWidget {
 }
 
 class _QuickCornerEditPageState extends State<QuickCornerEditPage> {
-  final TransformationController _transformationController =
-      TransformationController();
-  final GlobalKey _viewportKey = GlobalKey();
   late final QuickCornerInitialSelection? _initialSelection;
   late final QuickCornerViewportTransform? _coordinateTransform;
   DocumentCorners? _corners;
-  Offset? _dragPosition;
   Offset? _lastDragGlobal;
   int? _draggingCorner;
-  bool _initialTransformScheduled = false;
   bool _applying = false;
 
   @override
@@ -64,12 +58,6 @@ class _QuickCornerEditPageState extends State<QuickCornerEditPage> {
             Size(width.toDouble(), height.toDouble()),
           )
         : null;
-  }
-
-  @override
-  void dispose() {
-    _transformationController.dispose();
-    super.dispose();
   }
 
   @override
@@ -103,90 +91,64 @@ class _QuickCornerEditPageState extends State<QuickCornerEditPage> {
                       color: Colors.black,
                       child: LayoutBuilder(
                         builder: (context, constraints) {
-                          _scheduleInitialTransform(
-                            constraints.biggest,
-                            transform.sceneSize,
-                          );
+                          final display =
+                              QuickCornerFixedDisplayTransform.contain(
+                                sourceSize: transform.sourceSize,
+                                viewportSize: constraints.biggest,
+                                margin: 22,
+                              );
+                          final displayRect = display.displayRect;
                           return Stack(
-                            key: _viewportKey,
+                            key: const ValueKey('quick-corner-fixed-viewport'),
                             clipBehavior: Clip.none,
                             children: [
-                              Positioned.fill(
-                                child: InteractiveViewer(
+                              Positioned.fromRect(
+                                rect: displayRect,
+                                child: Image.file(
+                                  File(page.rawImagePath),
                                   key: const ValueKey(
-                                    'quick-corner-interactive-viewer',
+                                    'quick-corner-fixed-image',
                                   ),
-                                  transformationController:
-                                      _transformationController,
-                                  panEnabled: _draggingCorner == null,
-                                  scaleEnabled: _draggingCorner == null,
-                                  constrained: false,
-                                  minScale: 0.15,
-                                  maxScale: 8,
-                                  boundaryMargin: EdgeInsets.all(
-                                    math.max(
-                                      transform.sceneSize.width,
-                                      transform.sceneSize.height,
-                                    ),
-                                  ),
-                                  child: SizedBox.fromSize(
-                                    size: transform.sceneSize,
-                                    child: Stack(
-                                      clipBehavior: Clip.none,
-                                      children: [
-                                        Positioned.fill(
-                                          child: Image.file(
-                                            File(page.rawImagePath),
-                                            fit: BoxFit.fill,
-                                            filterQuality: FilterQuality.high,
-                                            errorBuilder:
-                                                (
-                                                  context,
-                                                  error,
-                                                  stackTrace,
-                                                ) => const Center(
-                                                  child: Icon(
-                                                    Icons
-                                                        .image_not_supported_outlined,
-                                                    color: Colors.white,
-                                                  ),
-                                                ),
-                                          ),
+                                  fit: BoxFit.fill,
+                                  filterQuality: FilterQuality.high,
+                                  errorBuilder: (context, error, stackTrace) =>
+                                      const Center(
+                                        child: Icon(
+                                          Icons.image_not_supported_outlined,
+                                          color: Colors.white,
                                         ),
-                                        Positioned.fill(
-                                          child: IgnorePointer(
-                                            child: CustomPaint(
-                                              painter: _QuickCornersPainter(
-                                                corners.ordered
-                                                    .map(
-                                                      transform.sourceToScene,
-                                                    )
-                                                    .toList(),
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                        for (
-                                          var index = 0;
-                                          index < corners.ordered.length;
-                                          index++
-                                        )
-                                          _cornerHandle(
-                                            index,
-                                            transform.sourceToScene(
-                                              corners.ordered[index],
-                                            ),
-                                            transform,
-                                          ),
-                                      ],
+                                      ),
+                                ),
+                              ),
+                              Positioned.fromRect(
+                                rect: displayRect,
+                                child: IgnorePointer(
+                                  child: CustomPaint(
+                                    painter: _QuickCornersPainter(
+                                      corners.ordered
+                                          .map(
+                                            (point) =>
+                                                display.sourceToViewport(
+                                                  point,
+                                                ) -
+                                                displayRect.topLeft,
+                                          )
+                                          .toList(),
                                     ),
                                   ),
                                 ),
                               ),
-                              if (_dragPosition case final position?)
-                                _CornerMagnifier(
-                                  position: position,
-                                  viewportSize: constraints.biggest,
+                              for (
+                                var index = 0;
+                                index < corners.ordered.length;
+                                index++
+                              )
+                                _cornerHandle(
+                                  index,
+                                  display.sourceToViewport(
+                                    corners.ordered[index],
+                                  ),
+                                  display,
                                 ),
                             ],
                           );
@@ -201,7 +163,7 @@ class _QuickCornerEditPageState extends State<QuickCornerEditPage> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Text(
-                          '초기 영역: ${_sourceLabel(_initialSelection!.source)} · 확대 후 모서리를 미세 조정하세요.',
+                          '자동으로 찾은 모서리를 필요할 때만 미세 조정하세요.',
                           key: const ValueKey('quick-corner-initial-source'),
                           style: Theme.of(context).textTheme.bodySmall,
                           textAlign: TextAlign.center,
@@ -248,7 +210,7 @@ class _QuickCornerEditPageState extends State<QuickCornerEditPage> {
   Widget _cornerHandle(
     int index,
     Offset position,
-    QuickCornerViewportTransform transform,
+    QuickCornerFixedDisplayTransform transform,
   ) {
     const size = 44.0;
     return Positioned(
@@ -260,7 +222,6 @@ class _QuickCornerEditPageState extends State<QuickCornerEditPage> {
         onPointerDown: (event) => setState(() {
           _draggingCorner = index;
           _lastDragGlobal = event.position;
-          _dragPosition = _globalToViewport(event.position);
         }),
         onPointerMove: (event) {
           if (_draggingCorner != index) return;
@@ -270,28 +231,36 @@ class _QuickCornerEditPageState extends State<QuickCornerEditPage> {
           final moved = transform.moveSourcePoint(
             point: corners.ordered[index],
             screenDelta: event.position - last,
-            viewportScale: _transformationController.value.getMaxScaleOnAxis(),
           );
           setState(() {
             _corners = corners.replaceAt(index, moved);
             _lastDragGlobal = event.position;
-            _dragPosition = _globalToViewport(event.position);
           });
         },
         onPointerUp: (_) => _finishCornerDrag(),
         onPointerCancel: (_) => _finishCornerDrag(),
-        child: const SizedBox.square(
+        child: SizedBox.square(
           dimension: size,
           child: Center(
             child: DecoratedBox(
               decoration: BoxDecoration(
-                color: Colors.white,
+                color: _draggingCorner == index
+                    ? Colors.lightGreenAccent
+                    : Colors.white,
                 shape: BoxShape.circle,
-                border: Border.fromBorderSide(
+                border: const Border.fromBorderSide(
                   BorderSide(color: Colors.lightGreenAccent, width: 3),
                 ),
+                boxShadow: _draggingCorner == index
+                    ? const [
+                        BoxShadow(
+                          color: Colors.lightGreenAccent,
+                          blurRadius: 10,
+                        ),
+                      ]
+                    : null,
               ),
-              child: SizedBox.square(dimension: 22),
+              child: const SizedBox.square(dimension: 22),
             ),
           ),
         ),
@@ -304,41 +273,20 @@ class _QuickCornerEditPageState extends State<QuickCornerEditPage> {
     setState(() {
       _draggingCorner = null;
       _lastDragGlobal = null;
-      _dragPosition = null;
-    });
-  }
-
-  Offset _globalToViewport(Offset global) {
-    final renderObject = _viewportKey.currentContext?.findRenderObject();
-    return renderObject is RenderBox
-        ? renderObject.globalToLocal(global)
-        : global;
-  }
-
-  void _scheduleInitialTransform(Size viewport, Size scene) {
-    if (_initialTransformScheduled || viewport.isEmpty || scene.isEmpty) return;
-    _initialTransformScheduled = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      final fit =
-          math.min(
-            viewport.width / scene.width,
-            viewport.height / scene.height,
-          ) *
-          0.92;
-      final left = (viewport.width - scene.width * fit) / 2;
-      final top = (viewport.height - scene.height * fit) / 2;
-      _transformationController.value = Matrix4.identity()
-        ..setEntry(0, 0, fit)
-        ..setEntry(1, 1, fit)
-        ..setEntry(0, 3, left)
-        ..setEntry(1, 3, top);
     });
   }
 
   Future<void> _apply() async {
     final corners = _corners;
     if (corners == null || _applying) return;
+    final sourceSize = _coordinateTransform?.sourceSize;
+    if (sourceSize == null ||
+        !QuickCornerValidationPolicy.isValid(corners, sourceSize: sourceSize)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('모서리가 서로 교차하지 않도록 문서 영역을 지정해주세요.')),
+      );
+      return;
+    }
     setState(() => _applying = true);
     final succeeded = await widget.sessionManager.applyManualCornersAt(
       widget.pageIndex,
@@ -352,64 +300,6 @@ class _QuickCornerEditPageState extends State<QuickCornerEditPage> {
     setState(() => _applying = false);
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('보정 결과를 만들지 못했습니다. 기존 스캔본은 유지됩니다.')),
-    );
-  }
-
-  static String _sourceLabel(QuickCornerInitialSource source) =>
-      switch (source) {
-        QuickCornerInitialSource.manual => '사용자 수정',
-        QuickCornerInitialSource.aiRefined => 'AI Refined',
-        QuickCornerInitialSource.aiRaw => 'AI Raw',
-        QuickCornerInitialSource.openCvBoundary => 'OpenCV',
-        QuickCornerInitialSource.finalCrop => '현재 Crop',
-        QuickCornerInitialSource.guideFallback => '촬영 가이드',
-      };
-}
-
-class _CornerMagnifier extends StatelessWidget {
-  const _CornerMagnifier({required this.position, required this.viewportSize});
-
-  final Offset position;
-  final Size viewportSize;
-
-  @override
-  Widget build(BuildContext context) {
-    const size = 120.0;
-    final left = (position.dx - size / 2).clamp(
-      8.0,
-      viewportSize.width - size - 8,
-    );
-    final top = (position.dy - size - 42).clamp(
-      8.0,
-      viewportSize.height - size - 8,
-    );
-    return Positioned(
-      key: const ValueKey('quick-corner-magnifier'),
-      left: left,
-      top: top,
-      child: IgnorePointer(
-        child: SizedBox.square(
-          dimension: size,
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              RawMagnifier(
-                size: const Size.square(size),
-                magnificationScale: 2.4,
-                focalPointOffset:
-                    position - Offset(left + size / 2, top + size / 2),
-                decoration: const MagnifierDecoration(
-                  shape: CircleBorder(
-                    side: BorderSide(color: Colors.white, width: 3),
-                  ),
-                  shadows: [BoxShadow(blurRadius: 8, color: Colors.black54)],
-                ),
-              ),
-              const CustomPaint(painter: _CrosshairPainter()),
-            ],
-          ),
-        ),
-      ),
     );
   }
 }
@@ -439,29 +329,4 @@ class _QuickCornersPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _QuickCornersPainter oldDelegate) =>
       oldDelegate.points != points;
-}
-
-class _CrosshairPainter extends CustomPainter {
-  const _CrosshairPainter();
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = size.center(Offset.zero);
-    final paint = Paint()
-      ..color = Colors.lightGreenAccent
-      ..strokeWidth = 1.5;
-    canvas.drawLine(
-      center - const Offset(12, 0),
-      center + const Offset(12, 0),
-      paint,
-    );
-    canvas.drawLine(
-      center - const Offset(0, 12),
-      center + const Offset(0, 12),
-      paint,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }

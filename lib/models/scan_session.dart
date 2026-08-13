@@ -86,12 +86,14 @@ class ScanSession {
     required CorrectionType type,
     String? correctedImagePath,
     CorrectionOutcome? outcome,
+    String? failureReason,
   }) {
     _pages[index] = _pages[index].withCorrection(
       status: status,
       type: type,
       correctedImagePath: correctedImagePath,
       outcome: outcome,
+      failureReason: failureReason,
     );
   }
 

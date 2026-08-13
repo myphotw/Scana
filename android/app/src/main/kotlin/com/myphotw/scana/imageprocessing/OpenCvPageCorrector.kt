@@ -1,5 +1,6 @@
 package com.myphotw.scana.imageprocessing
 
+import java.io.File
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.hypot
@@ -12,7 +13,7 @@ import org.opencv.android.OpenCVLoader
 import org.opencv.core.Core
 import org.opencv.core.CvType
 import org.opencv.core.Mat
-import org.opencv.core.MatOfInt
+import org.opencv.core.MatOfDouble
 import org.opencv.core.MatOfPoint
 import org.opencv.core.MatOfPoint2f
 import org.opencv.core.Point
@@ -29,6 +30,8 @@ object OpenCvPageCorrector {
     private const val REMAP_STRIP_HEIGHT = 192
     private const val MINIMUM_CURVE_SIGNALS = 2
     private const val MAXIMUM_CURVE_CANDIDATES = 24
+    private const val CONTOUR_ENDPOINT_TRIM_FRACTION = 0.10
+    private const val CONTOUR_ONLY_MILD_MAX_DEFORMATION_FRACTION = 0.006
 
     private val openCvReady: Boolean by lazy { OpenCVLoader.initLocal() }
 
@@ -40,6 +43,7 @@ object OpenCvPageCorrector {
         pageBoundaryMode: String,
         curvePolicyValues: Map<String, Number>,
         pageBoundary: Map<String, Any>?,
+        qualityDiagnosticsEnabled: Boolean,
     ): Map<String, Any> {
         check(openCvReady) { "OpenCV initialization failed." }
         val source = Imgcodecs.imread(sourceImagePath, Imgcodecs.IMREAD_COLOR)
@@ -49,46 +53,153 @@ object OpenCvPageCorrector {
         }
 
         var output: Mat? = null
+        var curveDiagnostics: MutableMap<String, Any>? = null
         try {
             output = when (correctionType) {
                 "perspective" -> {
                     val corners = parseAndValidateCorners(cornerValues, source.size())
                     applyPerspective(source, corners)
                 }
-                "curved" -> flattenCurvedPage(
-                    source,
-                    pageBoundaryMode,
-                    CurvePolicy.from(curvePolicyValues),
-                    cornerValues,
-                    pageBoundary,
-                )
+                "curved" -> {
+                    val flattened = flattenCurvedPage(
+                        source,
+                        pageBoundaryMode,
+                        CurvePolicy.from(curvePolicyValues),
+                        cornerValues,
+                        pageBoundary,
+                        outputImagePath,
+                        qualityDiagnosticsEnabled,
+                    )
+                    curveDiagnostics = flattened.diagnostics
+                    flattened.image
+                }
                 else -> throw IllegalArgumentException("Unknown correction type.")
             }
             if (correctionType == "curved") {
+                validateCurvedOutput(source, output, curveDiagnostics.orEmpty())
                 val beforeQuality = horizontalStraightness(source)
                 val afterQuality = horizontalStraightness(output)
-                if (beforeQuality > 0.0 && afterQuality < beforeQuality * 0.92) {
+                curveDiagnostics?.put("perspectiveStraightness", beforeQuality)
+                curveDiagnostics?.put("curvedStraightness", afterQuality)
+                val state = curveDiagnostics?.get("curvatureState") as? String
+                val strength = (curveDiagnostics?.get("deformationStrength") as? Number)
+                    ?.toDouble() ?: 1.0
+                val geometryBefore = (
+                    curveDiagnostics?.get("profileDeformationMagnitude") as? Number
+                    )?.toDouble() ?: 0.0
+                val effectiveDeformation = (
+                    curveDiagnostics?.get("effectiveDeformationMagnitude") as? Number
+                    )?.toDouble() ?: geometryBefore * strength
+                val geometryAfter = max(0.0, geometryBefore - effectiveDeformation)
+                curveDiagnostics?.put("geometryBefore", geometryBefore)
+                curveDiagnostics?.put("geometryAfter", geometryAfter)
+                val straightnessRatio = if (state == "mildCurve") 1.0005 else 1.005
+                val straightnessImproved = beforeQuality > 0.0 &&
+                    afterQuality >= beforeQuality * straightnessRatio
+                val geometryImproved = state == "mildCurve" &&
+                    geometryBefore >= CurvePolicy.from(curvePolicyValues)
+                        .minimumDeformationFraction &&
+                    geometryAfter <= geometryBefore * 0.995
+                if (!straightnessImproved && !geometryImproved) {
                     throw CurvedCorrectionException(
                         "curve_not_improved",
-                        "Curved output did not improve horizontal structure.",
+                        "Curved output did not improve page geometry.",
+                        curveDiagnostics.orEmpty() +
+                            mapOf(
+                                "rejectionReason" to "no_geometry_or_straightness_improvement",
+                                "requiredStraightnessRatio" to straightnessRatio,
+                            ),
                     )
                 }
             }
-            val parameters = MatOfInt(Imgcodecs.IMWRITE_JPEG_QUALITY, 95)
-            val written = try {
-                Imgcodecs.imwrite(outputImagePath, output, parameters)
-            } finally {
-                parameters.release()
+            val sourceQuality = if (qualityDiagnosticsEnabled) {
+                OpenCvImageQuality.metrics(source, "source")
+            } else {
+                emptyMap()
             }
+            val outputQuality = if (qualityDiagnosticsEnabled) {
+                OpenCvImageQuality.metrics(output, "output")
+            } else {
+                emptyMap()
+            }
+            val written = OpenCvImageQuality.write(outputImagePath, output)
             check(written) { "The corrected image could not be written." }
-            return mapOf(
+            return mutableMapOf<String, Any>(
                 "outputWidth" to output.cols(),
                 "outputHeight" to output.rows(),
                 "outcome" to "completed",
-            )
+                "outputFormat" to File(outputImagePath).extension.lowercase(),
+            ).apply {
+                putAll(sourceQuality)
+                putAll(outputQuality)
+                curveDiagnostics?.let { put("curveDiagnostics", it) }
+            }
         } finally {
             output?.release()
             source.release()
+        }
+    }
+
+    /** Rejects corrupt/empty canvases before they can replace perspective. */
+    private fun validateCurvedOutput(
+        perspective: Mat,
+        curved: Mat,
+        diagnostics: Map<String, Any>,
+    ) {
+        if (curved.empty() || curved.cols() <= 1 || curved.rows() <= 1) {
+            throw CurvedCorrectionException(
+                "curve_unsafe",
+                "Curved correction produced an empty image.",
+                diagnostics + mapOf("rejectionReason" to "output_empty"),
+            )
+        }
+        val widthChange = abs(curved.cols() - perspective.cols()).toDouble() /
+            perspective.cols().coerceAtLeast(1)
+        val heightChange = abs(curved.rows() - perspective.rows()).toDouble() /
+            perspective.rows().coerceAtLeast(1)
+        val perspectiveAspect = perspective.cols().toDouble() / perspective.rows()
+        val curvedAspect = curved.cols().toDouble() / curved.rows()
+        val aspectChange = abs(curvedAspect - perspectiveAspect) / perspectiveAspect
+        if (widthChange > 0.02 || heightChange > 0.02 || aspectChange > 0.02) {
+            throw CurvedCorrectionException(
+                "curve_unsafe",
+                "Curved correction changed the perspective canvas.",
+                diagnostics +
+                    mapOf(
+                        "rejectionReason" to "canvas_changed",
+                        "widthChange" to widthChange,
+                        "heightChange" to heightChange,
+                        "aspectChange" to aspectChange,
+                    ),
+            )
+        }
+
+        val gray = Mat()
+        val mean = MatOfDouble()
+        val deviation = MatOfDouble()
+        try {
+            Imgproc.cvtColor(curved, gray, Imgproc.COLOR_BGR2GRAY)
+            Core.meanStdDev(gray, mean, deviation)
+            val meanValue = mean.toArray().firstOrNull() ?: 0.0
+            val deviationValue = deviation.toArray().firstOrNull() ?: 0.0
+            if (!meanValue.isFinite() || !deviationValue.isFinite() ||
+                meanValue < 8.0 || (meanValue < 25.0 && deviationValue < 0.5)
+            ) {
+                throw CurvedCorrectionException(
+                    "curve_unsafe",
+                    "Curved correction produced an invalid image.",
+                    diagnostics +
+                        mapOf(
+                            "rejectionReason" to "output_invalid",
+                            "outputMean" to meanValue,
+                            "outputDeviation" to deviationValue,
+                        ),
+                )
+            }
+        } finally {
+            deviation.release()
+            mean.release()
+            gray.release()
         }
     }
 
@@ -122,7 +233,9 @@ object OpenCvPageCorrector {
                 corrected,
                 transform,
                 Size(outputWidth.toDouble(), outputHeight.toDouble()),
-                Imgproc.INTER_CUBIC,
+                // Linear interpolation avoids the wider cubic kernel that can
+                // soften small glyphs during a full-resolution document warp.
+                Imgproc.INTER_LINEAR,
                 Core.BORDER_REPLICATE,
                 Scalar.all(255.0),
             )
@@ -140,7 +253,10 @@ object OpenCvPageCorrector {
         policy: CurvePolicy,
         cornerValues: List<Map<String, Number>>,
         pageBoundary: Map<String, Any>?,
-    ): Mat {
+        debugOutputPath: String,
+        debugArtifactsEnabled: Boolean,
+    ): CurvedFlattenResult {
+        val detectionStartedAt = System.nanoTime()
         check(perspective.rows() > 1 && perspective.cols() > 2) {
             "The perspective image is too small for curved correction."
         }
@@ -180,32 +296,71 @@ object OpenCvPageCorrector {
                 kernel.release()
             }
 
-            val boundaryCurves = if (pageBoundaryMode == "detected") {
+            val pixelGeometry = if (pageBoundaryMode == "detected") {
                 collectBoundaryCurves(gray, region, policy)
             } else {
-                emptyList()
+                PageGeometryCurves()
             }
-            val metadataCurves = collectMetadataBoundaryCurves(
+            val metadataGeometry = collectMetadataBoundaryCurves(
                 pageBoundary,
                 cornerValues,
                 analysis.cols(),
                 analysis.rows(),
             )
             val spineSignal = collectSpineBoundarySignal(pageBoundary, cornerValues)
-            val textCurves = collectTextCurves(horizontal, region, policy)
-            val pageCurves = metadataCurves + boundaryCurves
-            val signals = if (pageCurves.size >= 2) {
-                pageCurves + textCurves.take(8)
+            val internalSignals = collectTextCurves(horizontal, region, policy)
+            val textCurves = internalSignals.map { it.raw }
+            val normalizedTextCurves = internalSignals.map { it.normalized }
+            val geometry = metadataGeometry.withFallback(pixelGeometry)
+            val topCurve = geometry.top
+            val bottomCurve = geometry.bottom
+            val pageCurves = listOfNotNull(topCurve, bottomCurve)
+            val fusion = curvatureEvidenceFusion(
+                geometry = geometry,
+                spineSignal = spineSignal,
+                internalCurves = normalizedTextCurves,
+                internalRawCurves = textCurves,
+                imageHeight = analysis.rows(),
+                flatMagnitudeLimit = policy.minimumDeformationFraction,
+            )
+            if (debugArtifactsEnabled) {
+                writeCurvatureDebugOverlays(
+                    perspective = perspective,
+                    analysis = analysis,
+                    horizontal = horizontal,
+                    topCurve = topCurve,
+                    bottomCurve = bottomCurve,
+                    spineSide = pageBoundary?.get("spineSide") as? String,
+                    outputPath = debugOutputPath,
+                )
+            }
+            val internalProfileCoverage = candidateCoverage(textCurves, region)
+            val internalProfileAvailable = textCurves.isNotEmpty() &&
+                internalProfileCoverage >= policy.minimumEvidenceCoverage &&
+                fusion.internalSignalCount > 0
+            val signals = if (internalProfileAvailable) {
+                textCurves.take(8)
             } else {
-                textCurves + pageCurves
+                pageCurves
             }
             val evidenceCount = pageCurves.size +
                 (if (spineSignal != null) 1 else 0) +
                 min(2, textCurves.size)
             if (evidenceCount < MINIMUM_CURVE_SIGNALS || signals.isEmpty()) {
                 throw CurvedCorrectionException(
-                    "curve_low_confidence",
+                    "curve_insufficient_evidence",
                     "Stable page curvature was not found.",
+                    mapOf(
+                        "rejectionReason" to "insufficient_evidence",
+                        "pageCurveCount" to pageCurves.size,
+                        "horizontalLineCount" to textCurves.size,
+                        "spineSignalCount" to if (spineSignal == null) 0 else 1,
+                        "evidenceCount" to evidenceCount,
+                        "minimumEvidenceCount" to MINIMUM_CURVE_SIGNALS,
+                        "minimumConfidence" to policy.minimumConfidence,
+                        "curvatureState" to "unreliable",
+                        "detectMs" to elapsedMilliseconds(detectionStartedAt),
+                    ) + fusion.diagnostics(),
                 )
             }
             val estimate = aggregateCurves(
@@ -213,14 +368,112 @@ object OpenCvPageCorrector {
                 region,
                 analysis.rows(),
                 policy,
-                pageCurves.size >= 2,
+                !internalProfileAvailable && pageCurves.size >= 2,
                 evidenceCount,
+                fusion.diagnostics(),
             )
+            if (!internalProfileAvailable) {
+                clampContourOnlyProfile(estimate.offsets, region, analysis.rows())
+            }
             if (spineSignal != null) {
                 applySpineWeight(estimate.offsets, spineSignal)
             }
-            validateCurveOrThrow(estimate, analysis.rows(), policy)
-            return remapInStrips(perspective, estimate.offsets, analysis.rows())
+            val profileDeformationMagnitude =
+                (estimate.offsets.maxOfOrNull { abs(it) } ?: 0.0) / max(1, analysis.rows())
+            val curvatureState = classifyCurvature(estimate, fusion, analysis.rows(), policy)
+            val deformationStrength = when (curvatureState) {
+                "flat" -> throw CurvedCorrectionException(
+                    "curve_nearly_flat",
+                    "The page is already nearly flat.",
+                    estimate.diagnostics(policy, analysis.rows()) + fusion.diagnostics() +
+                        mapOf(
+                            "curvatureState" to curvatureState,
+                            "curvatureMagnitude" to profileDeformationMagnitude,
+                            "combinedMagnitude" to profileDeformationMagnitude,
+                            "profileDeformationMagnitude" to profileDeformationMagnitude,
+                            "effectiveDeformationMagnitude" to 0.0,
+                            "deformationStrength" to 0.0,
+                            "rejectReason" to "curvature_too_small",
+                            "rejectionReason" to "curvature_too_small",
+                            "detectMs" to elapsedMilliseconds(detectionStartedAt),
+                        ),
+                )
+                "mildCurve" -> policy.mildDewarpStrength
+                "strongCurve" -> 1.0
+                else -> {
+                    val rejectionReason = when {
+                        fusion.conflicting -> "evidence_direction_conflict"
+                        estimate.consistency < policy.minimumEvidenceConsistency ->
+                            "curve_consistency_too_low"
+                        fusion.pageContourMagnitude >= policy.minimumDeformationFraction ->
+                            "geometry_mild_support_incomplete"
+                        estimate.confidence < policy.mildMinimumConfidence ->
+                            "confidence_below_mild_threshold"
+                        else -> "evidence_unreliable"
+                    }
+                    throw CurvedCorrectionException(
+                        "curve_low_confidence",
+                        "Curve evidence is unreliable.",
+                        estimate.diagnostics(policy, analysis.rows()) + fusion.diagnostics() +
+                            mapOf(
+                                "curvatureState" to "unreliable",
+                                "curvatureMagnitude" to profileDeformationMagnitude,
+                                "combinedMagnitude" to profileDeformationMagnitude,
+                                "profileDeformationMagnitude" to profileDeformationMagnitude,
+                                "effectiveDeformationMagnitude" to 0.0,
+                                "deformationStrength" to 0.0,
+                                "rejectReason" to rejectionReason,
+                                "rejectionReason" to rejectionReason,
+                                "detectMs" to elapsedMilliseconds(detectionStartedAt),
+                            ),
+                    )
+                }
+            }
+            if (deformationStrength < 1.0) {
+                for (index in estimate.offsets.indices) {
+                    estimate.offsets[index] *= deformationStrength
+                }
+            }
+            val effectiveDeformationMagnitude =
+                (estimate.offsets.maxOfOrNull { abs(it) } ?: 0.0) / max(1, analysis.rows())
+            validateCurveOrThrow(
+                estimate,
+                analysis.rows(),
+                policy,
+                requireStrongConfidence = curvatureState == "strongCurve",
+                requireMinimumDeformation = curvatureState == "strongCurve",
+                additionalDiagnostics = fusion.diagnostics() +
+                    mapOf(
+                        "curvatureState" to curvatureState,
+                        "internalDeformationMagnitude" to fusion.internalMagnitude,
+                        "profileDeformationMagnitude" to profileDeformationMagnitude,
+                        "effectiveDeformationMagnitude" to effectiveDeformationMagnitude,
+                        "profileSource" to
+                            if (internalProfileAvailable) "internal" else "contour_clamped",
+                        "deformationStrength" to deformationStrength,
+                    ),
+            )
+            val detectionMilliseconds = elapsedMilliseconds(detectionStartedAt)
+            val dewarpStartedAt = System.nanoTime()
+            val image = remapInStrips(perspective, estimate.offsets, analysis.rows())
+            val dewarpMilliseconds = elapsedMilliseconds(dewarpStartedAt)
+            return CurvedFlattenResult(
+                image,
+                (estimate.diagnostics(policy, analysis.rows()) + fusion.diagnostics() +
+                    mapOf(
+                        "curvatureState" to curvatureState,
+                        "curvatureMagnitude" to profileDeformationMagnitude,
+                        "combinedMagnitude" to profileDeformationMagnitude,
+                        "internalDeformationMagnitude" to fusion.internalMagnitude,
+                        "profileDeformationMagnitude" to profileDeformationMagnitude,
+                        "effectiveDeformationMagnitude" to effectiveDeformationMagnitude,
+                        "profileSource" to if (internalProfileAvailable) "internal" else "contour_clamped",
+                        "internalProfileCoverage" to internalProfileCoverage,
+                        "deformationStrength" to deformationStrength,
+                        "detectMs" to detectionMilliseconds,
+                        "dewarpMs" to dewarpMilliseconds,
+                    )).toMutableMap(),
+            )
         } finally {
             horizontal.release()
             binary.release()
@@ -244,11 +497,101 @@ object OpenCvPageCorrector {
         )
     }
 
+    private fun writeCurvatureDebugOverlays(
+        perspective: Mat,
+        analysis: Mat,
+        horizontal: Mat,
+        topCurve: DoubleArray?,
+        bottomCurve: DoubleArray?,
+        spineSide: String?,
+        outputPath: String,
+    ) {
+        try {
+            val parent = File(outputPath).parentFile ?: return
+            val stem = File(outputPath).nameWithoutExtension
+                .trimStart('.')
+                .replace(Regex("[^A-Za-z0-9_.-]"), "_")
+            val directory = File(parent, "debug_curvature/$stem")
+            if (!directory.exists() && !directory.mkdirs()) return
+            OpenCvImageQuality.write(File(directory, "perspective.png").path, perspective)
+
+            val contourOverlay = perspective.clone()
+            try {
+                val xScale = perspective.cols().toDouble() / max(1, analysis.cols())
+                val yScale = perspective.rows().toDouble() / max(1, analysis.rows())
+                fun drawCurve(curve: DoubleArray?, baseline: Double, color: Scalar) {
+                    if (curve == null) return
+                    var previous: Point? = null
+                    curve.forEachIndexed { x, offset ->
+                        if (!offset.isFinite()) return@forEachIndexed
+                        val current = Point(x * xScale, baseline + offset * yScale)
+                        previous?.let { Imgproc.line(contourOverlay, it, current, color, 3) }
+                        if (x % max(1, curve.size / 16) == 0) {
+                            Imgproc.circle(contourOverlay, current, 5, color, Imgproc.FILLED)
+                        }
+                        previous = current
+                    }
+                }
+                val topBaseline = perspective.rows() * 0.04
+                val bottomBaseline = perspective.rows() * 0.96
+                Imgproc.line(
+                    contourOverlay,
+                    Point(0.0, topBaseline),
+                    Point((perspective.cols() - 1).toDouble(), topBaseline),
+                    Scalar(255.0, 255.0, 255.0),
+                    1,
+                )
+                Imgproc.line(
+                    contourOverlay,
+                    Point(0.0, bottomBaseline),
+                    Point((perspective.cols() - 1).toDouble(), bottomBaseline),
+                    Scalar(255.0, 255.0, 255.0),
+                    1,
+                )
+                drawCurve(topCurve, topBaseline, Scalar(0.0, 255.0, 0.0))
+                drawCurve(bottomCurve, bottomBaseline, Scalar(0.0, 180.0, 255.0))
+                if (spineSide == "left" || spineSide == "right") {
+                    val x = if (spineSide == "left") {
+                        perspective.cols() * 0.02
+                    } else {
+                        perspective.cols() * 0.98
+                    }
+                    Imgproc.line(
+                        contourOverlay,
+                        Point(x, 0.0),
+                        Point(x, (perspective.rows() - 1).toDouble()),
+                        Scalar(255.0, 0.0, 255.0),
+                        3,
+                    )
+                }
+                OpenCvImageQuality.write(
+                    File(directory, "contour_overlay.png").path,
+                    contourOverlay,
+                )
+            } finally {
+                contourOverlay.release()
+            }
+
+            val internalOverlay = Mat()
+            try {
+                Imgproc.cvtColor(horizontal, internalOverlay, Imgproc.COLOR_GRAY2BGR)
+                OpenCvImageQuality.write(
+                    File(directory, "internal_lines_overlay.png").path,
+                    internalOverlay,
+                )
+            } finally {
+                internalOverlay.release()
+            }
+        } catch (_: Throwable) {
+            // DEBUG artifacts must never affect production correction.
+        }
+    }
+
     private fun collectBoundaryCurves(
         gray: Mat,
         region: Rect,
         policy: CurvePolicy,
-    ): List<DoubleArray> {
+    ): PageGeometryCurves {
         val edges = Mat()
         val longEdges = Mat()
         try {
@@ -284,15 +627,25 @@ object OpenCvPageCorrector {
                     }
                 }
             }
-            return listOfNotNull(
-                normalizeCandidate(top, region.x, region.x + region.width, gray.rows(), policy),
-                normalizeCandidate(
-                    bottom,
-                    region.x,
-                    region.x + region.width,
-                    gray.rows(),
-                    policy,
-                ),
+            val topRaw = normalizeCandidate(
+                top,
+                region.x,
+                region.x + region.width,
+                gray.rows(),
+                policy,
+            )
+            val bottomRaw = normalizeCandidate(
+                bottom,
+                region.x,
+                region.x + region.width,
+                gray.rows(),
+                policy,
+            )
+            return PageGeometryCurves(
+                top = topRaw,
+                bottom = bottomRaw,
+                topRaw = topRaw,
+                bottomRaw = bottomRaw,
             )
         } finally {
             longEdges.release()
@@ -304,7 +657,7 @@ object OpenCvPageCorrector {
         horizontal: Mat,
         region: Rect,
         policy: CurvePolicy,
-    ): List<DoubleArray> {
+    ): List<InternalCurveSignal> {
         val contourInput = horizontal.clone()
         val hierarchy = Mat()
         val contours = mutableListOf<MatOfPoint>()
@@ -343,7 +696,14 @@ object OpenCvPageCorrector {
                     }
                     if (yValues.isNotEmpty()) samples[x] = median(yValues)
                 }
-                normalizeCandidate(samples, startX, endX, horizontal.rows(), policy)
+                val raw = normalizeCandidate(
+                    samples,
+                    startX,
+                    endX,
+                    horizontal.rows(),
+                    policy,
+                ) ?: return@mapNotNull null
+                InternalCurveSignal(raw = raw, normalized = raw.copyOf())
             }
         } finally {
             contours.forEach { it.release() }
@@ -357,19 +717,19 @@ object OpenCvPageCorrector {
         cornerValues: List<Map<String, Number>>,
         targetWidth: Int,
         targetHeight: Int,
-    ): List<DoubleArray> {
+    ): PageGeometryCurves {
         if (boundary == null || cornerValues.size != 4 || targetWidth < 3 || targetHeight < 3) {
-            return emptyList()
+            return PageGeometryCurves()
         }
         val sourceHeight = (boundary["sourceHeight"] as? Number)?.toDouble()
-            ?: return emptyList()
-        if (sourceHeight <= 0.0) return emptyList()
+            ?: return PageGeometryCurves()
+        if (sourceHeight <= 0.0) return PageGeometryCurves()
         val corners = cornerValues.mapNotNull { value ->
             val x = value["x"]?.toDouble()
             val y = value["y"]?.toDouble()
             if (x == null || y == null || !x.isFinite() || !y.isFinite()) null else Point(x, y)
         }
-        if (corners.size != 4) return emptyList()
+        if (corners.size != 4) return PageGeometryCurves()
 
         fun points(key: String): List<Point> {
             val values = boundary[key] as? List<*> ?: return emptyList()
@@ -385,23 +745,27 @@ object OpenCvPageCorrector {
             }
         }
 
-        return listOfNotNull(
-            metadataCurve(
-                points("top"),
-                corners[0],
-                corners[1],
-                sourceHeight,
-                targetWidth,
-                targetHeight,
-            ),
-            metadataCurve(
-                points("bottom"),
-                corners[3],
-                corners[2],
-                sourceHeight,
-                targetWidth,
-                targetHeight,
-            ),
+        val topRaw = metadataCurve(
+            points("top"),
+            corners[0],
+            corners[1],
+            sourceHeight,
+            targetWidth,
+            targetHeight,
+        )
+        val bottomRaw = metadataCurve(
+            points("bottom"),
+            corners[3],
+            corners[2],
+            sourceHeight,
+            targetWidth,
+            targetHeight,
+        )
+        return PageGeometryCurves(
+            top = topRaw,
+            bottom = bottomRaw,
+            topRaw = topRaw,
+            bottomRaw = bottomRaw,
         )
     }
 
@@ -430,12 +794,25 @@ object OpenCvPageCorrector {
         if (start == null || end == null) return null
         val chordLength = distance(start, end)
         if (chordLength <= 1.0) return null
-        val curvature = points.maxOf { point ->
-            distanceToLineSegment(point, start, end)
-        } / chordLength
+        val rawSignedDistances = points.mapNotNull { point ->
+            val projection = chordProjection(point, start, end)
+            if (projection.t !in CONTOUR_ENDPOINT_TRIM_FRACTION..
+                (1.0 - CONTOUR_ENDPOINT_TRIM_FRACTION)
+            ) {
+                null
+            } else {
+                projection.signedDistance
+            }
+        }
+        if (rawSignedDistances.size < 3) return null
+        val curvature = robustMagnitude(rawSignedDistances) / chordLength
+        if (!curvature.isFinite() || curvature < 0.0005) return null
         return SpineBoundarySignal(
             side = side,
+            curvature = curvature,
             strength = max(0.45, (curvature * 30.0).coerceIn(0.0, 1.0)),
+            rawSign = directionOf(rawSignedDistances),
+            normalizedSign = directionOf(rawSignedDistances),
         )
     }
 
@@ -448,7 +825,7 @@ object OpenCvPageCorrector {
         }
     }
 
-    private fun distanceToLineSegment(point: Point, start: Point, end: Point): Double {
+    private fun chordProjection(point: Point, start: Point, end: Point): ChordProjection {
         val dx = end.x - start.x
         val dy = end.y - start.y
         val lengthSquared = dx * dx + dy * dy
@@ -457,7 +834,37 @@ object OpenCvPageCorrector {
                 .coerceIn(0.0, 1.0)
         val x = start.x + dx * ratio
         val y = start.y + dy * ratio
-        return hypot(point.x - x, point.y - y)
+        val length = sqrt(lengthSquared)
+        val signedDistance = if (length <= 0.0) {
+            0.0
+        } else {
+            (point.x - x) * (-dy / length) + (point.y - y) * (dx / length)
+        }
+        return ChordProjection(ratio, signedDistance)
+    }
+
+    private fun negatedCurve(curve: DoubleArray): DoubleArray =
+        DoubleArray(curve.size) { index ->
+            if (curve[index].isFinite()) -curve[index] else Double.NaN
+        }
+
+    private fun robustMagnitude(values: List<Double>): Double {
+        if (values.isEmpty()) return 0.0
+        val sorted = values.filter { it.isFinite() }.map { abs(it) }.sorted()
+        if (sorted.isEmpty()) return 0.0
+        val index = ((sorted.size - 1) * 0.90).roundToInt().coerceIn(0, sorted.lastIndex)
+        return sorted[index]
+    }
+
+    private fun directionOf(values: List<Double>): Int {
+        val finite = values.filter { it.isFinite() }
+        if (finite.size < 3) return 0
+        val center = median(finite)
+        return when {
+            center > 0.000001 -> 1
+            center < -0.000001 -> -1
+            else -> 0
+        }
     }
 
     private fun metadataCurve(
@@ -513,14 +920,49 @@ object OpenCvPageCorrector {
         val left = median((startX until startX + anchorWidth).map { samples[it] })
         val right = median((endX - anchorWidth until endX).map { samples[it] })
         val offsets = DoubleArray(samples.size) { Double.NaN }
-        var maximum = 0.0
         for (x in startX until endX) {
             val ratio = (x - startX).toDouble() / max(1, endX - startX - 1)
             val value = samples[x] - (left + (right - left) * ratio)
             offsets[x] = value
-            maximum = max(maximum, abs(value))
         }
-        return if (maximum <= imageHeight * policy.maximumDeformationFraction) offsets else null
+        val trim = ((endX - startX) * CONTOUR_ENDPOINT_TRIM_FRACTION).roundToInt()
+        val robustValues = (startX + trim until endX - trim)
+            .map { offsets[it] }
+            .filter { it.isFinite() }
+        val robustMaximum = robustMagnitude(robustValues)
+        return if (robustMaximum <= imageHeight * policy.maximumDeformationFraction) {
+            offsets
+        } else {
+            null
+        }
+    }
+
+    private fun candidateCoverage(candidates: List<DoubleArray>, region: Rect): Double {
+        if (candidates.isEmpty() || region.width <= 0) return 0.0
+        val coveredColumns = (region.x until region.x + region.width).count { x ->
+            candidates.any { candidate -> x in candidate.indices && candidate[x].isFinite() }
+        }
+        return coveredColumns.toDouble() / region.width
+    }
+
+    private fun clampContourOnlyProfile(
+        offsets: DoubleArray,
+        region: Rect,
+        imageHeight: Int,
+    ) {
+        val cap = imageHeight * CONTOUR_ONLY_MILD_MAX_DEFORMATION_FRACTION
+        val centralStart = region.x + (region.width * CONTOUR_ENDPOINT_TRIM_FRACTION).roundToInt()
+        val centralEnd = region.x + region.width -
+            (region.width * CONTOUR_ENDPOINT_TRIM_FRACTION).roundToInt()
+        val centralValues = (centralStart until centralEnd)
+            .mapNotNull { index -> offsets.getOrNull(index)?.takeIf { it.isFinite() } }
+        val robustCap = min(cap, robustMagnitude(centralValues))
+        for (index in offsets.indices) {
+            if (offsets[index].isFinite()) {
+                offsets[index] = offsets[index].coerceIn(-robustCap, robustCap)
+            }
+        }
+        applyEdgeTaper(offsets, region)
     }
 
     private fun aggregateCurves(
@@ -530,6 +972,7 @@ object OpenCvPageCorrector {
         policy: CurvePolicy,
         boundaryPreferred: Boolean,
         evidenceCount: Int,
+        evidenceDiagnostics: Map<String, Any> = emptyMap(),
     ): CurveEstimate {
         val offsets = DoubleArray(candidates.first().size) { Double.NaN }
         var validColumns = 0
@@ -548,10 +991,19 @@ object OpenCvPageCorrector {
             validColumns++
         }
         val coverage = validColumns.toDouble() / region.width
-        if (coverage < if (boundaryPreferred) 0.65 else 0.48) {
+        val minimumCoverage = if (boundaryPreferred) 0.65 else 0.48
+        if (coverage < minimumCoverage) {
             throw CurvedCorrectionException(
-                "curve_low_confidence",
+                "curve_insufficient_coverage",
                 "Curve signals do not cover enough of the page.",
+                mapOf(
+                    "rejectionReason" to "insufficient_coverage",
+                    "coverage" to coverage,
+                    "minimumCoverage" to minimumCoverage,
+                    "evidenceCount" to evidenceCount,
+                    "boundaryPreferred" to boundaryPreferred,
+                    "minimumConfidence" to policy.minimumConfidence,
+                ) + evidenceDiagnostics,
             )
         }
         interpolateMissing(offsets, region.x, region.x + region.width)
@@ -574,32 +1026,73 @@ object OpenCvPageCorrector {
             typicalDisagreement / max(1.0, imageHeight * policy.maximumDeformationFraction),
         )
         val confidence = coverage * 0.45 + candidateScore * 0.30 + consistency * 0.25
-        return CurveEstimate(smoothed, confidence)
+        return CurveEstimate(
+            offsets = smoothed,
+            confidence = confidence,
+            coverage = coverage,
+            candidateScore = candidateScore,
+            consistency = consistency,
+            evidenceCount = evidenceCount,
+            boundaryPreferred = boundaryPreferred,
+        )
     }
 
     private fun validateCurveOrThrow(
         estimate: CurveEstimate,
         imageHeight: Int,
         policy: CurvePolicy,
+        requireStrongConfidence: Boolean = true,
+        requireMinimumDeformation: Boolean = true,
+        additionalDiagnostics: Map<String, Any> = emptyMap(),
     ) {
         val offsets = estimate.offsets
-        if (!estimate.confidence.isFinite() || estimate.confidence < policy.minimumConfidence) {
-            throw CurvedCorrectionException("curve_low_confidence", "Curve confidence is low.")
+        val diagnostics = estimate.diagnostics(policy, imageHeight) + additionalDiagnostics
+        if (!estimate.confidence.isFinite() ||
+            (requireStrongConfidence && estimate.confidence < policy.minimumConfidence)
+        ) {
+            throw CurvedCorrectionException(
+                "curve_low_confidence",
+                "Curve confidence is low.",
+                diagnostics +
+                    mapOf("rejectionReason" to "confidence_below_threshold"),
+            )
         }
         if (offsets.size < 3 || offsets.any { !it.isFinite() }) {
-            throw CurvedCorrectionException("curve_unsafe", "Curve contains unsafe coordinates.")
+            throw CurvedCorrectionException(
+                "curve_unsafe",
+                "Curve contains unsafe coordinates.",
+                diagnostics +
+                    mapOf("rejectionReason" to "geometry_invalid"),
+            )
         }
         val maximum = offsets.maxOf { abs(it) }
-        if (maximum < imageHeight * policy.minimumDeformationFraction) {
-            throw CurvedCorrectionException("curve_nearly_flat", "The page is already nearly flat.")
+        if (requireMinimumDeformation &&
+            maximum < imageHeight * policy.minimumDeformationFraction
+        ) {
+            throw CurvedCorrectionException(
+                "curve_nearly_flat",
+                "The page is already nearly flat.",
+                diagnostics +
+                    mapOf("rejectionReason" to "curvature_too_small"),
+            )
         }
         if (maximum > imageHeight * policy.maximumDeformationFraction) {
-            throw CurvedCorrectionException("curve_unsafe", "Curve deformation is excessive.")
+            throw CurvedCorrectionException(
+                "curve_unsafe",
+                "Curve deformation is excessive.",
+                diagnostics +
+                    mapOf("rejectionReason" to "deformation_excessive"),
+            )
         }
         val adjacentLimit = imageHeight * policy.maximumAdjacentDifferenceFraction
         for (x in 1 until offsets.size) {
             if (abs(offsets[x] - offsets[x - 1]) > adjacentLimit) {
-                throw CurvedCorrectionException("curve_unsafe", "Curve changes too abruptly.")
+                throw CurvedCorrectionException(
+                    "curve_unsafe",
+                    "Curve changes too abruptly.",
+                    diagnostics +
+                        mapOf("rejectionReason" to "inconsistent_curve"),
+                )
             }
         }
         for (offset in offsets) {
@@ -612,11 +1105,220 @@ object OpenCvPageCorrector {
                     mappedY > imageHeight - 1 ||
                     mappedY <= previous
                 ) {
-                    throw CurvedCorrectionException("curve_unsafe", "Remap coordinates are unsafe.")
+                    throw CurvedCorrectionException(
+                        "curve_unsafe",
+                        "Remap coordinates are unsafe.",
+                        diagnostics +
+                            mapOf("rejectionReason" to "geometry_invalid"),
+                    )
                 }
                 previous = mappedY
             }
         }
+    }
+
+    private fun curvatureEvidenceFusion(
+        geometry: PageGeometryCurves,
+        spineSignal: SpineBoundarySignal?,
+        internalCurves: List<DoubleArray>,
+        internalRawCurves: List<DoubleArray>,
+        imageHeight: Int,
+        flatMagnitudeLimit: Double,
+    ): CurvatureEvidenceFusion {
+        val topCurve = geometry.top
+        val bottomCurve = geometry.bottom
+        val topMagnitude = curveMagnitude(topCurve, imageHeight)
+        val bottomMagnitude = curveMagnitude(bottomCurve, imageHeight)
+        val internalMagnitudes = internalCurves.map { curveMagnitude(it, imageHeight) }
+            .filter { it.isFinite() }
+        val internalMagnitude = if (internalMagnitudes.isEmpty()) {
+            0.0
+        } else {
+            median(internalMagnitudes)
+        }
+        val normalizedGeometryDirections = buildList {
+            if (topMagnitude >= flatMagnitudeLimit * 0.7) {
+                curveDirection(topCurve)?.let(::add)
+            }
+            if (bottomMagnitude >= flatMagnitudeLimit * 0.7) {
+                curveDirection(bottomCurve)?.let(::add)
+            }
+        }
+        val normalizedInternalDirections = buildList {
+            internalCurves.take(4).forEach { curve ->
+                if (curveMagnitude(curve, imageHeight) >= flatMagnitudeLimit * 0.7) {
+                    curveDirection(curve)?.let(::add)
+                }
+            }
+        }
+        val normalizedDirections =
+            normalizedGeometryDirections + normalizedInternalDirections
+        val rawDirections = buildList {
+            if (topMagnitude >= flatMagnitudeLimit * 0.7) {
+                curveDirection(geometry.topRaw)?.let(::add)
+            }
+            if (bottomMagnitude >= flatMagnitudeLimit * 0.7) {
+                curveDirection(geometry.bottomRaw)?.let(::add)
+            }
+            internalRawCurves.take(4).forEach { curve ->
+                if (curveMagnitude(curve, imageHeight) >= flatMagnitudeLimit * 0.7) {
+                    curveDirection(curve)?.let(::add)
+                }
+            }
+        }
+        val positive = normalizedDirections.count { it > 0 }
+        val negative = normalizedDirections.count { it < 0 }
+        val directionConsistency = if (normalizedDirections.isEmpty()) {
+            0.0
+        } else {
+            max(positive, negative).toDouble() / normalizedDirections.size
+        }
+        val geometryDirection = dominantDirection(normalizedGeometryDirections)
+        val internalDirection = dominantDirection(normalizedInternalDirections)
+        val crossGroupConflict = normalizedGeometryDirections.size >= 2 &&
+            normalizedInternalDirections.size >= 2 &&
+            geometryDirection != 0 && internalDirection != 0 &&
+            geometryDirection != internalDirection &&
+            directionConsistencyOf(normalizedGeometryDirections) >= 0.67 &&
+            directionConsistencyOf(normalizedInternalDirections) >= 0.67
+        val conflicting = hasDirectionConflict(normalizedGeometryDirections) ||
+            hasDirectionConflict(normalizedInternalDirections) ||
+            crossGroupConflict
+        val conflictBeforeNormalization = hasDirectionConflict(rawDirections)
+        val pageContourMagnitude = max(topMagnitude, bottomMagnitude)
+        val geometrySignalCount =
+            listOf(topMagnitude, bottomMagnitude).count { it >= flatMagnitudeLimit } +
+                if ((spineSignal?.curvature ?: 0.0) >= flatMagnitudeLimit * 0.7) 1 else 0
+        val internalSignalCount = internalMagnitudes.count { it >= flatMagnitudeLimit }
+        val contourDirection = when {
+            topMagnitude >= bottomMagnitude -> curveDirection(topCurve)
+            else -> curveDirection(bottomCurve)
+        }
+        val strongestInternalDirection = internalCurves
+            .maxByOrNull { curveMagnitude(it, imageHeight) }
+            ?.let(::curveDirection)
+        val contourInternalAgree = contourDirection != null &&
+            strongestInternalDirection != null && contourDirection == strongestInternalDirection
+        val mildSupported = pageContourMagnitude >= flatMagnitudeLimit &&
+            !conflicting &&
+            directionConsistency >= 0.67 &&
+            (geometrySignalCount >= 2 ||
+                (geometrySignalCount >= 1 && internalSignalCount >= 1 && contourInternalAgree))
+        return CurvatureEvidenceFusion(
+            topMagnitude = topMagnitude,
+            bottomMagnitude = bottomMagnitude,
+            spineMagnitude = spineSignal?.curvature ?: 0.0,
+            internalMagnitude = internalMagnitude,
+            pageContourMagnitude = pageContourMagnitude,
+            directionConsistency = directionConsistency,
+            geometrySignalCount = geometrySignalCount,
+            internalSignalCount = internalSignalCount,
+            contourInternalAgree = contourInternalAgree,
+            mildSupported = mildSupported,
+            conflicting = conflicting,
+            topRawSign = curveDirection(geometry.topRaw) ?: 0,
+            bottomRawSign = curveDirection(geometry.bottomRaw) ?: 0,
+            spineRawSign = spineSignal?.rawSign ?: 0,
+            topNormalizedSign = curveDirection(topCurve) ?: 0,
+            bottomNormalizedSign = curveDirection(bottomCurve) ?: 0,
+            spineNormalizedSign = spineSignal?.normalizedSign ?: 0,
+            conflictBeforeNormalization = conflictBeforeNormalization,
+            horizontalDirectionVotes = mapOf(
+                "top" to (curveDirection(topCurve) ?: 0),
+                "bottom" to (curveDirection(bottomCurve) ?: 0),
+                "internal" to normalizedInternalDirections,
+            ),
+        )
+    }
+
+    private fun curveMagnitude(curve: DoubleArray?, imageHeight: Int): Double {
+        if (curve == null || imageHeight <= 0) return 0.0
+        val finiteIndices = curve.indices.filter { curve[it].isFinite() }
+        if (finiteIndices.isEmpty()) return 0.0
+        val trim = (finiteIndices.size * CONTOUR_ENDPOINT_TRIM_FRACTION).roundToInt()
+            .coerceAtMost((finiteIndices.size - 1) / 2)
+        val central = finiteIndices.drop(trim).dropLast(trim).map { curve[it] }
+        return robustMagnitude(central) / imageHeight
+    }
+
+    private fun curveDirection(curve: DoubleArray?): Int? {
+        if (curve == null) return null
+        val finiteIndices = curve.indices.filter { curve[it].isFinite() }
+        if (finiteIndices.size < 3) return null
+        val trim = (finiteIndices.size * CONTOUR_ENDPOINT_TRIM_FRACTION).roundToInt()
+            .coerceAtMost((finiteIndices.size - 1) / 2)
+        val finite = finiteIndices.drop(trim).dropLast(trim).map { curve[it] }
+        if (finite.size < 3) return null
+        val center = median(finite)
+        return when {
+            center > 0.000001 -> 1
+            center < -0.000001 -> -1
+            else -> null
+        }
+    }
+
+    private fun hasDirectionConflict(directions: List<Int>): Boolean {
+        if (directions.isEmpty()) return false
+        val positive = directions.count { it > 0 }
+        val negative = directions.count { it < 0 }
+        val consistency = max(positive, negative).toDouble() / directions.size
+        return positive > 0 && negative > 0 && consistency < 0.67
+    }
+
+    private fun directionConsistencyOf(directions: List<Int>): Double {
+        if (directions.isEmpty()) return 0.0
+        return max(directions.count { it > 0 }, directions.count { it < 0 }).toDouble() /
+            directions.size
+    }
+
+    private fun dominantDirection(directions: List<Int>): Int {
+        val positive = directions.count { it > 0 }
+        val negative = directions.count { it < 0 }
+        return when {
+            positive > negative -> 1
+            negative > positive -> -1
+            else -> 0
+        }
+    }
+
+    private fun classifyCurvature(
+        estimate: CurveEstimate,
+        fusion: CurvatureEvidenceFusion,
+        imageHeight: Int,
+        policy: CurvePolicy,
+    ): String {
+        val magnitude = (estimate.offsets.maxOfOrNull { abs(it) } ?: 0.0) /
+            max(1, imageHeight)
+        if (!magnitude.isFinite() ||
+            !estimate.confidence.isFinite() ||
+            estimate.evidenceCount < MINIMUM_CURVE_SIGNALS ||
+            estimate.coverage < policy.minimumEvidenceCoverage ||
+            fusion.conflicting
+        ) {
+            return "unreliable"
+        }
+        val allComponentsFlat = magnitude < policy.minimumDeformationFraction &&
+            fusion.pageContourMagnitude < policy.minimumDeformationFraction &&
+            fusion.internalMagnitude < policy.minimumDeformationFraction
+        if (allComponentsFlat) return "flat"
+        val existingMildRule = magnitude < policy.mildMagnitudeLimit &&
+            estimate.confidence >= policy.mildMinimumConfidence &&
+            estimate.coverage >= policy.mildMinimumCoverage &&
+            estimate.consistency >= policy.mildMinimumConsistency
+        val geometryMildRule = magnitude < policy.mildMagnitudeLimit &&
+            fusion.mildSupported &&
+            estimate.confidence >= 0.50 &&
+            estimate.coverage >= policy.minimumEvidenceCoverage &&
+            estimate.consistency >= policy.minimumEvidenceConsistency
+        if (existingMildRule || geometryMildRule) {
+            return "mildCurve"
+        }
+        if (magnitude >= policy.mildMagnitudeLimit &&
+            estimate.confidence >= policy.minimumConfidence
+        ) {
+            return "strongCurve"
+        }
+        return "unreliable"
     }
 
     private fun horizontalStraightness(source: Mat): Double {
@@ -703,7 +1405,7 @@ object OpenCvPageCorrector {
                     strip,
                     mapX,
                     mapY,
-                    Imgproc.INTER_CUBIC,
+                    Imgproc.INTER_LINEAR,
                     Core.BORDER_REPLICATE,
                     Scalar.all(255.0),
                 )
@@ -830,13 +1532,125 @@ object OpenCvPageCorrector {
     private fun distance(first: Point, second: Point): Double =
         hypot(first.x - second.x, first.y - second.y)
 
-    private data class CurveEstimate(val offsets: DoubleArray, val confidence: Double)
+    private fun elapsedMilliseconds(startedAt: Long): Int =
+        ((System.nanoTime() - startedAt) / 1_000_000L).toInt()
 
-    private data class SpineBoundarySignal(val side: String, val strength: Double)
+    private data class CurveEstimate(
+        val offsets: DoubleArray,
+        val confidence: Double,
+        val coverage: Double,
+        val candidateScore: Double,
+        val consistency: Double,
+        val evidenceCount: Int,
+        val boundaryPreferred: Boolean,
+    ) {
+        fun diagnostics(policy: CurvePolicy, imageHeight: Int): Map<String, Any> = mapOf(
+            "confidence" to confidence,
+            "minimumConfidence" to policy.minimumConfidence,
+            "coverage" to coverage,
+            "candidateScore" to candidateScore,
+            "consistency" to consistency,
+            "evidenceCount" to evidenceCount,
+            "boundaryPreferred" to boundaryPreferred,
+            "maximumDeformationFraction" to
+                (offsets.maxOfOrNull { abs(it) } ?: 0.0) / max(1, imageHeight),
+            "curvatureMagnitude" to
+                (offsets.maxOfOrNull { abs(it) } ?: 0.0) / max(1, imageHeight),
+            "combinedMagnitude" to
+                (offsets.maxOfOrNull { abs(it) } ?: 0.0) / max(1, imageHeight),
+            "minimumDeformationFraction" to policy.minimumDeformationFraction,
+            "allowedMaximumDeformationFraction" to policy.maximumDeformationFraction,
+        )
+    }
+
+    private data class CurvedFlattenResult(
+        val image: Mat,
+        val diagnostics: MutableMap<String, Any>,
+    )
+
+    private data class PageGeometryCurves(
+        val top: DoubleArray? = null,
+        val bottom: DoubleArray? = null,
+        val topRaw: DoubleArray? = top,
+        val bottomRaw: DoubleArray? = bottom,
+    ) {
+        fun withFallback(fallback: PageGeometryCurves): PageGeometryCurves = PageGeometryCurves(
+            top = top ?: fallback.top,
+            bottom = bottom ?: fallback.bottom,
+            topRaw = topRaw ?: fallback.topRaw,
+            bottomRaw = bottomRaw ?: fallback.bottomRaw,
+        )
+    }
+
+    private data class CurvatureEvidenceFusion(
+        val topMagnitude: Double,
+        val bottomMagnitude: Double,
+        val spineMagnitude: Double,
+        val internalMagnitude: Double,
+        val pageContourMagnitude: Double,
+        val directionConsistency: Double,
+        val geometrySignalCount: Int,
+        val internalSignalCount: Int,
+        val contourInternalAgree: Boolean,
+        val mildSupported: Boolean,
+        val conflicting: Boolean,
+        val topRawSign: Int,
+        val bottomRawSign: Int,
+        val spineRawSign: Int,
+        val topNormalizedSign: Int,
+        val bottomNormalizedSign: Int,
+        val spineNormalizedSign: Int,
+        val conflictBeforeNormalization: Boolean,
+        val horizontalDirectionVotes: Map<String, Any>,
+    ) {
+        fun diagnostics(): Map<String, Any> = mapOf(
+            "pageContourMagnitude" to pageContourMagnitude,
+            "topCurve" to topMagnitude,
+            "bottomCurve" to bottomMagnitude,
+            "spineCurve" to spineMagnitude,
+            "internalLineMagnitude" to internalMagnitude,
+            "geometryDirectionConsistency" to directionConsistency,
+            "geometryEvidenceCount" to geometrySignalCount,
+            "internalEvidenceCount" to internalSignalCount,
+            "contourInternalAgree" to contourInternalAgree,
+            "geometryMildSupported" to mildSupported,
+            "evidenceConflict" to conflicting,
+            "topRawSign" to topRawSign,
+            "bottomRawSign" to bottomRawSign,
+            "spineRawSign" to spineRawSign,
+            "topNormalizedSign" to topNormalizedSign,
+            "bottomNormalizedSign" to bottomNormalizedSign,
+            "spineNormalizedSign" to spineNormalizedSign,
+            "directionConflictBeforeNormalization" to conflictBeforeNormalization,
+            "directionConflictAfterNormalization" to conflicting,
+            "signConvention" to "rectified_y_axis",
+            "horizontalDirectionVotes" to horizontalDirectionVotes,
+            "spineUsedForDirectionConflict" to false,
+        )
+    }
+
+    private data class SpineBoundarySignal(
+        val side: String,
+        val curvature: Double,
+        val strength: Double,
+        val rawSign: Int,
+        val normalizedSign: Int,
+    )
+
+    private data class InternalCurveSignal(
+        val raw: DoubleArray,
+        val normalized: DoubleArray,
+    )
+
+    private data class ChordProjection(
+        val t: Double,
+        val signedDistance: Double,
+    )
 
     class CurvedCorrectionException(
         val code: String,
         message: String,
+        val details: Map<String, Any> = emptyMap(),
     ) : IllegalStateException(message)
 
     private data class CurvePolicy(
@@ -845,6 +1659,13 @@ object OpenCvPageCorrector {
         val minimumDeformationFraction: Double,
         val maximumDeformationFraction: Double,
         val maximumAdjacentDifferenceFraction: Double,
+        val minimumEvidenceCoverage: Double,
+        val minimumEvidenceConsistency: Double,
+        val mildMagnitudeLimit: Double,
+        val mildMinimumConfidence: Double,
+        val mildMinimumCoverage: Double,
+        val mildMinimumConsistency: Double,
+        val mildDewarpStrength: Double,
     ) {
         companion object {
             fun from(values: Map<String, Number>): CurvePolicy = CurvePolicy(
@@ -856,6 +1677,20 @@ object OpenCvPageCorrector {
                     values.requiredDouble("maximumDeformationFraction", 0.0, 0.1),
                 maximumAdjacentDifferenceFraction =
                     values.requiredDouble("maximumAdjacentDifferenceFraction", 0.0, 0.1),
+                minimumEvidenceCoverage =
+                    values.requiredDouble("minimumEvidenceCoverage", 0.0, 1.0),
+                minimumEvidenceConsistency =
+                    values.requiredDouble("minimumEvidenceConsistency", 0.0, 1.0),
+                mildMagnitudeLimit =
+                    values.requiredDouble("mildMagnitudeLimit", 0.0, 0.1),
+                mildMinimumConfidence =
+                    values.requiredDouble("mildMinimumConfidence", 0.0, 1.0),
+                mildMinimumCoverage =
+                    values.requiredDouble("mildMinimumCoverage", 0.0, 1.0),
+                mildMinimumConsistency =
+                    values.requiredDouble("mildMinimumConsistency", 0.0, 1.0),
+                mildDewarpStrength =
+                    values.requiredDouble("mildDewarpStrength", 0.0, 1.0),
             ).also { policy ->
                 require(policy.minimumDeformationFraction < policy.maximumDeformationFraction)
             }

@@ -3,6 +3,60 @@ import 'dart:math' as math;
 import 'package:scana/models/ai_document_segmentation_result.dart';
 import 'package:scana/models/document_geometry.dart';
 
+class AiEdgeVisibilityPolicy {
+  const AiEdgeVisibilityPolicy._();
+
+  static const confirmedTransition = 0.30;
+  static const confirmedSupport = 0.46;
+  static const weakTransition = 0.16;
+  static const weakSupport = 0.28;
+  static const occludedThreshold = 0.48;
+  static const borderThreshold = 0.025;
+
+  static AiEdgeVisibilityStatus classify({
+    required double transitionScore,
+    required double supportingSampleRatio,
+    required double borderDistance,
+    required double occlusionPenalty,
+    required bool reliable,
+  }) {
+    if (occlusionPenalty >= occludedThreshold) {
+      return AiEdgeVisibilityStatus.occluded;
+    }
+    if (borderDistance <= borderThreshold &&
+        transitionScore < confirmedTransition) {
+      return AiEdgeVisibilityStatus.outOfFrame;
+    }
+    if (reliable &&
+        transitionScore >= confirmedTransition &&
+        supportingSampleRatio >= confirmedSupport) {
+      return AiEdgeVisibilityStatus.confirmed;
+    }
+    if (transitionScore >= weakTransition ||
+        supportingSampleRatio >= weakSupport) {
+      return AiEdgeVisibilityStatus.weak;
+    }
+    return AiEdgeVisibilityStatus.unknown;
+  }
+
+  static double minimumOutwardMargin(
+    AiBoundaryEdgeName edge,
+    AiEdgeVisibilityStatus status,
+  ) {
+    if (status == AiEdgeVisibilityStatus.confirmed) return 0;
+    final bottom = edge == AiBoundaryEdgeName.bottom;
+    if (status == AiEdgeVisibilityStatus.weak) {
+      return bottom ? 0.035 : 0.012;
+    }
+    return bottom
+        ? 0.070
+        : switch (status) {
+            AiEdgeVisibilityStatus.occluded => 0.030,
+            _ => 0.040,
+          };
+  }
+}
+
 /// Testable mirror of the native AI refinement acceptance contract.
 ///
 /// Native OpenCV owns pixel analysis; this policy documents and verifies the

@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:scana/models/ai_document_segmentation_result.dart';
+import 'package:scana/models/document_geometry.dart';
 import 'package:scana/services/image_processing/ai_document_segmenter.dart';
 import 'package:scana/services/image_processing/document_detector.dart';
 
@@ -199,6 +200,25 @@ void main() {
     );
 
     expect((calls.single.arguments as Map)['pageSide'], 'right');
+  });
+
+  test('request carries the common expected guide when supplied', () async {
+    _recordSuccess(messenger, channel, calls);
+    await const PlatformAiDocumentSegmenter(channel: channel).segment(
+      'C:/session/raw.jpg',
+      expectedGuideCorners: const DocumentCorners(
+        topLeft: DocumentPoint(10, 20),
+        topRight: DocumentPoint(990, 20),
+        bottomRight: DocumentPoint(990, 1480),
+        bottomLeft: DocumentPoint(10, 1480),
+      ),
+      debugStem: 'raw_guide',
+    );
+
+    final guide =
+        (calls.single.arguments as Map)['expectedGuideCorners'] as List;
+    expect(guide, hasLength(4));
+    expect((guide.first as Map)['x'], 10);
   });
 
   test(

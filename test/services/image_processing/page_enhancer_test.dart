@@ -30,6 +30,24 @@ void main() {
         'foregroundEnhancementMilliseconds': 34,
         'sharpeningMilliseconds': 42,
         'totalEnhancementMilliseconds': 168,
+        'outputFormat': 'png',
+        'sourceWidth': 3024,
+        'sourceHeight': 4032,
+        'sourceSharpness': 128.5,
+        'sourceForegroundSharpness': 180.25,
+        'sourceForegroundPixels': 12000,
+        'sourceBackgroundVariance': 6.25,
+        'sourceDarkSpeckleRatio': 0.018,
+        'sourceBackgroundPixels': 780000,
+        'outputSharpness': 132.0,
+        'outputForegroundSharpness': 184.0,
+        'outputForegroundPixels': 11980,
+        'outputBackgroundVariance': 4.75,
+        'outputDarkSpeckleRatio': 0.012,
+        'outputBackgroundPixels': 782000,
+        'sharpeningAmount': 0.17,
+        'foregroundDarkeningAmount': 0.20,
+        'sourceLuminanceBlend': 0.07,
       };
     });
     const enhancer = OpenCvPageEnhancer(channel: channel);
@@ -49,6 +67,14 @@ void main() {
     expect(result.outputWidth, 3024);
     expect(result.outputHeight, 4032);
     expect(result.processingMilliseconds, 187);
+    expect(result.outputFormat, 'png');
+    expect(result.sourceQuality.foregroundSharpness, 180.25);
+    expect(result.outputQuality.foregroundSharpness, 184.0);
+    expect(result.sourceQuality.darkSpeckleRatio, 0.018);
+    expect(result.outputQuality.backgroundVariance, 4.75);
+    expect(result.sharpeningAmount, 0.17);
+    expect(result.foregroundDarkeningAmount, 0.20);
+    expect(result.sourceLuminanceBlend, 0.07);
     expect(result.stageTimings, {
       'backgroundAnalysisMilliseconds': 31,
       'backgroundNormalizationMilliseconds': 22,
@@ -96,6 +122,28 @@ void main() {
       enhancer.enhance(
         sourceImagePath: '/session/corrected_001.jpg',
         outputImagePath: '/session/.enhanced_001.jpg.pending.jpg',
+        mode: EnhancementMode.scanColor,
+      ),
+      throwsFormatException,
+    );
+  });
+
+  test('rejects malformed Scan Color tuning metadata', () async {
+    messenger.defaultBinaryMessenger.setMockMethodCallHandler(
+      channel,
+      (_) async => <String, Object>{
+        'outputWidth': 3024,
+        'outputHeight': 4032,
+        'processingMilliseconds': 187,
+        'sharpeningAmount': 1.1,
+      },
+    );
+    const enhancer = OpenCvPageEnhancer(channel: channel);
+
+    expect(
+      enhancer.enhance(
+        sourceImagePath: '/session/corrected_001.png',
+        outputImagePath: '/session/.enhanced_001.png.pending.png',
         mode: EnhancementMode.scanColor,
       ),
       throwsFormatException,

@@ -1,7 +1,10 @@
+import 'dart:convert';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as path;
 
 import 'package:scana/app.dart';
 import 'package:scana/features/page_editor/presentation/page_editor_page.dart';
@@ -38,6 +41,34 @@ void main() {
     expect(find.text('책 가운데를 기준선에 맞춰주세요'), findsOneWidget);
   });
 
+  testWidgets('fixed single and spread guides remain independent from AI', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: Stack(
+            children: [
+              FixedCaptureGuide(mode: ScanCaptureMode.single),
+              FixedCaptureGuide(mode: ScanCaptureMode.spread),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    expect(
+      find.byKey(const ValueKey('fixedCaptureGuide-single')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('fixedCaptureGuide-spread')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const Key('fixedSpreadCenterGuide')), findsOneWidget);
+    expect(find.byKey(const Key('exportDebugLogButton')), findsNothing);
+  });
+
   test('single mode keeps the shutter at bottom center', () {
     expect(
       CameraCaptureButtonLayout.alignmentFor(ScanCaptureMode.single),
@@ -67,6 +98,50 @@ void main() {
   test('PDF gallery uses at least two responsive columns', () {
     expect(PdfSelectionGalleryLayout.columnCount(360), 2);
     expect(PdfSelectionGalleryLayout.columnCount(900), 4);
+  });
+
+  testWidgets('gallery actions stay below the scan thumbnail', (tester) async {
+    final manager = _viewerManagerWithPages(1);
+    addTearDown(manager.close);
+    await tester.pumpWidget(
+      MaterialApp(home: PageManagementPage(sessionManager: manager)),
+    );
+    await tester.pumpAndSettle();
+
+    final image = tester.getRect(
+      find.byKey(const ValueKey('managed-thumbnail-rotation-1')),
+    );
+    final actions = tester.getRect(
+      find.byKey(const ValueKey('gallery-action-row-/raw_1.jpg')),
+    );
+    expect(actions.top, greaterThanOrEqualTo(image.bottom));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('gallery action row stays inside cards on a narrow screen', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final manager = _viewerManagerWithPages(2);
+    addTearDown(manager.close);
+    await tester.pumpWidget(
+      MaterialApp(home: PageManagementPage(sessionManager: manager)),
+    );
+    await tester.pumpAndSettle();
+
+    final card = tester.getRect(
+      find.byKey(const ValueKey('pdf-gallery-page-/raw_1.jpg')),
+    );
+    final actions = tester.getRect(
+      find.byKey(const ValueKey('gallery-action-row-/raw_1.jpg')),
+    );
+    expect(actions.left, greaterThanOrEqualTo(card.left));
+    expect(actions.right, lessThanOrEqualTo(card.right));
+    expect(actions.bottom, lessThanOrEqualTo(card.bottom));
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('PDF completion is disabled until a gallery page is selected', (
@@ -216,6 +291,10 @@ void main() {
     await tester.tap(find.byKey(const Key('reviewSelectedPagesButton')));
     await tester.pumpAndSettle();
 
+    expect(
+      find.byKey(const ValueKey('pdf-review-action-row-/raw_1.jpg')),
+      findsOneWidget,
+    );
     await tester.tap(
       find.byKey(const ValueKey('pdf-review-quick-corner-/raw_1.jpg')),
     );
@@ -681,6 +760,7 @@ void main() {
     await tester.pump();
     var image = tester.widget<Image>(find.byType(Image).first);
     expect((image.image as FileImage).file.path, '/enhanced.jpg');
+    expect(image.filterQuality, FilterQuality.medium);
 
     await tester.pumpWidget(
       MaterialApp(home: PageManagementPage(sessionManager: manager)),
@@ -694,53 +774,48 @@ void main() {
     );
   });
 
-  testWidgets('corner preview does not overlap the action toolbar', (
-    tester,
-  ) async {
-    final manager = ScanSessionManager(storage: _TestSessionStorage());
-    addTearDown(manager.close);
-    final session = ScanSession(
-      id: 'corner-session',
-      createdTime: DateTime.utc(2026, 8, 10),
-    );
-    session.addPage(
-      ScanPage(
-        pageNo: 1,
-        rawImagePath: '/missing/raw_001.jpg',
+  testWidgets(
+    'Page Editor keeps automatic scan preview separate from corner edit',
+    (tester) async {
+      final manager = ScanSessionManager(storage: _TestSessionStorage());
+      addTearDown(manager.close);
+      final session = ScanSession(
+        id: 'corner-session',
         createdTime: DateTime.utc(2026, 8, 10),
-        documentSourceWidth: 1000,
-        documentSourceHeight: 1500,
-        documentCorners: const DocumentCorners(
-          topLeft: DocumentPoint(0, 0),
-          topRight: DocumentPoint(1000, 0),
-          bottomRight: DocumentPoint(1000, 1500),
-          bottomLeft: DocumentPoint(0, 1500),
+      );
+      session.addPage(
+        ScanPage(
+          pageNo: 1,
+          rawImagePath: '/missing/raw_001.jpg',
+          createdTime: DateTime.utc(2026, 8, 10),
+          documentSourceWidth: 1000,
+          documentSourceHeight: 1500,
+          documentCorners: const DocumentCorners(
+            topLeft: DocumentPoint(0, 0),
+            topRight: DocumentPoint(1000, 0),
+            bottomRight: DocumentPoint(1000, 1500),
+            bottomLeft: DocumentPoint(0, 1500),
+          ),
         ),
-      ),
-    );
-    manager.restoreSession(session);
+      );
+      manager.restoreSession(session);
 
-    await tester.pumpWidget(
-      MaterialApp(home: PageEditorPage(sessionManager: manager)),
-    );
-    await tester.tap(find.text('페이지 1'));
-    await tester.pumpAndSettle();
+      await tester.pumpWidget(
+        MaterialApp(home: PageEditorPage(sessionManager: manager)),
+      );
+      await tester.tap(find.text('페이지 1'));
+      await tester.pumpAndSettle();
 
-    final preview = tester.getRect(
-      find.byKey(const ValueKey('page-editor-image-preview')),
-    );
-    final toolbar = tester.getRect(
-      find.byKey(const ValueKey('page-editor-action-toolbar')),
-    );
-    final bottomRight = tester.getRect(
-      find.byKey(const ValueKey('document-corner-2')),
-    );
-
-    expect(preview.bottom, lessThanOrEqualTo(toolbar.top));
-    expect(bottomRight.right, lessThanOrEqualTo(preview.right));
-    expect(bottomRight.bottom, lessThanOrEqualTo(preview.bottom));
-    expect(find.text('모서리 저장'), findsOneWidget);
-  });
+      expect(
+        find.byKey(const ValueKey('editor-corrected-rotation')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('document-corner-2')), findsNothing);
+      expect(find.text('원근 보정'), findsNothing);
+      expect(find.text('보정 실행'), findsNothing);
+      expect(find.text('모서리 수정'), findsOneWidget);
+    },
+  );
 
   testWidgets(
     'scan result viewer defaults to corrected image and supports pages',
@@ -776,6 +851,17 @@ void main() {
       expect(find.text('재촬영'), findsOneWidget);
       expect(find.text('모서리 수정'), findsOneWidget);
       expect(find.text('삭제'), findsOneWidget);
+      final retakeRect = tester.getRect(
+        find.byKey(const ValueKey('viewer-retake-button')),
+      );
+      final cornerRect = tester.getRect(
+        find.byKey(const ValueKey('viewer-quick-corner-button')),
+      );
+      final deleteRect = tester.getRect(
+        find.byKey(const ValueKey('viewer-delete-button')),
+      );
+      expect(retakeRect.height, cornerRect.height);
+      expect(cornerRect.height, deleteRect.height);
 
       await tester.tap(find.byKey(const ValueKey('viewer-rotate-button')));
       await tester.pumpAndSettle();
@@ -804,7 +890,7 @@ void main() {
     },
   );
   testWidgets(
-    'detailed editing hides raw corners until corner editing is chosen',
+    'Page Editor shows automatic scan and opens focused corner editing',
     (tester) async {
       final manager = ScanSessionManager(storage: _TestSessionStorage());
       addTearDown(manager.close);
@@ -848,10 +934,14 @@ void main() {
         EnhancementStatus.completed,
       );
 
-      expect(find.text('모서리 수정'), findsOneWidget);
-      await tester.tap(find.text('모서리 수정'));
+      expect(find.text('원근 보정'), findsNothing);
+      expect(find.text('책/곡면 문서 보정'), findsNothing);
+      expect(find.text('다시 보정'), findsNothing);
+      await tester.tap(
+        find.byKey(const ValueKey('page-editor-quick-corner-button')),
+      );
       await tester.pumpAndSettle();
-      expect(find.text('스캔본으로 돌아가기'), findsOneWidget);
+      expect(find.byType(QuickCornerEditPage), findsOneWidget);
     },
   );
   testWidgets('DEBUG Page Editor exposes AI segmentation comparison', (
@@ -923,6 +1013,129 @@ void main() {
     expect(find.byKey(const ValueKey('ai-comparison-aiMask')), findsOneWidget);
     expect(find.textContaining('ownership 0.91'), findsOneWidget);
     expect(find.textContaining('accepted'), findsOneWidget);
+  });
+
+  test('Page Editor development controls are hidden for release builds', () {
+    expect(
+      PageEditorDebugUiPolicy.showDeveloperControls(isDebugBuild: true),
+      isTrue,
+    );
+    expect(
+      PageEditorDebugUiPolicy.showDeveloperControls(isDebugBuild: false),
+      isFalse,
+    );
+  });
+
+  testWidgets('DEBUG Page Editor reads the latest curvature report', (
+    tester,
+  ) async {
+    final sessionDirectory = Directory.systemTemp.createTempSync(
+      'scana-curvature-diagnostics-',
+    );
+    addTearDown(() {
+      if (sessionDirectory.existsSync()) {
+        sessionDirectory.deleteSync(recursive: true);
+      }
+    });
+    final rawPath = path.join(sessionDirectory.path, 'raw_001.jpg');
+    final reportDirectory = Directory(
+      path.join(sessionDirectory.path, 'debug_curvature', 'raw_001'),
+    );
+    reportDirectory.createSync(recursive: true);
+    File(
+      path.join(reportDirectory.path, 'curvature_report.json'),
+    ).writeAsStringSync(
+      const JsonEncoder.withIndent('  ').convert(<String, Object>{
+        'state': 'mildCurve',
+        'applied': true,
+        'pageContourMagnitude': 0.0042,
+        'topCurve': 0.0031,
+        'bottomCurve': 0.0042,
+        'spineCurve': 0.0024,
+        'internalLineMagnitude': 0.0018,
+        'effectiveDeformationMagnitude': 0.00099,
+        'topRawSign': 1,
+        'bottomRawSign': -1,
+        'spineRawSign': 1,
+        'topNormalizedSign': 1,
+        'bottomNormalizedSign': 1,
+        'spineNormalizedSign': 1,
+        'directionConflictBeforeNormalization': true,
+        'directionConflictAfterNormalization': false,
+        'signConvention': 'rectified_y_axis',
+        'horizontalDirectionVotes': <String, Object>{
+          'top': 1,
+          'bottom': 1,
+          'internal': <int>[1],
+        },
+        'spineUsedForDirectionConflict': false,
+        'coverage': 0.74,
+        'evidenceCount': 4,
+        'consistency': 0.82,
+        'confidence': 0.78,
+        'deformationStrength': 0.35,
+        'perspectiveStraightness': 0.71,
+        'curvedStraightness': 0.84,
+        'geometryBefore': 0.0042,
+        'geometryAfter': 0.0021,
+        'rejectReason': 'none',
+        'detectMs': 120,
+        'dewarpMs': 80,
+      }),
+    );
+
+    final manager = ScanSessionManager(storage: _TestSessionStorage());
+    addTearDown(manager.close);
+    final session = ScanSession(
+      id: 'curvature-diagnostics-session',
+      createdTime: DateTime.utc(2026, 8, 13),
+    );
+    session.addPage(
+      ScanPage(
+        pageNo: 1,
+        rawImagePath: rawPath,
+        createdTime: DateTime.utc(2026, 8, 13),
+        curvatureState: CurvatureState.mildCurve,
+        curvedApplied: true,
+      ),
+    );
+    manager.restoreSession(session);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: PageEditorPage(
+          sessionManager: manager,
+          initialPageIndex: 0,
+          showPageList: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('curvature-diagnostics-button')),
+      findsOneWidget,
+    );
+    await tester.tap(
+      find.byKey(const ValueKey('curvature-diagnostics-button')),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('곡면보정 진단'), findsWidgets);
+    expect(find.byKey(const ValueKey('curvature-value-state')), findsOneWidget);
+    expect(find.text('MILD_CURVE'), findsOneWidget);
+    expect(find.text('0.0042'), findsWidgets);
+    expect(find.text('0.35'), findsOneWidget);
+    expect(find.text('0.00099'), findsOneWidget);
+    expect(find.text('rectified_y_axis'), findsOneWidget);
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('curvature-value-totalMs')),
+    );
+    await tester.pump();
+    expect(find.text('200'), findsOneWidget);
+    expect(find.text('none'), findsOneWidget);
+    expect(find.byKey(const ValueKey('curvature-report-raw')), findsOneWidget);
   });
 }
 

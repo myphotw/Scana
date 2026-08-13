@@ -84,6 +84,7 @@ abstract interface class AiDocumentSegmenter {
     String imagePath, {
     DocumentPageSide? pageSide,
     DocumentCorners? openCvCorners,
+    DocumentCorners? expectedGuideCorners,
     String? debugOutputDirectory,
     required String debugStem,
   });
@@ -102,6 +103,7 @@ class NoOpAiDocumentSegmenter implements AiDocumentSegmenter {
     String imagePath, {
     DocumentPageSide? pageSide,
     DocumentCorners? openCvCorners,
+    DocumentCorners? expectedGuideCorners,
     String? debugOutputDirectory,
     required String debugStem,
   }) async => AiDocumentSegmentationResult(
@@ -157,6 +159,7 @@ class PlatformAiDocumentSegmenter implements AiDocumentSegmenter {
     String imagePath, {
     DocumentPageSide? pageSide,
     DocumentCorners? openCvCorners,
+    DocumentCorners? expectedGuideCorners,
     String? debugOutputDirectory,
     required String debugStem,
   }) async {
@@ -171,6 +174,10 @@ class PlatformAiDocumentSegmenter implements AiDocumentSegmenter {
           'debugStem': debugStem,
           if (openCvCorners != null)
             'openCvCorners': openCvCorners.ordered
+                .map((point) => {'x': point.x, 'y': point.y})
+                .toList(),
+          if (expectedGuideCorners != null)
+            'expectedGuideCorners': expectedGuideCorners.ordered
                 .map((point) => {'x': point.x, 'y': point.y})
                 .toList(),
         },
@@ -193,6 +200,8 @@ class PlatformAiDocumentSegmenter implements AiDocumentSegmenter {
         ...value,
         'corners': _cornersFromNative(value['corners'])?.toJson(),
         'refinedCorners': _cornersFromNative(value['refinedCorners'])?.toJson(),
+        'paperContour': value['paperContour'],
+        'finalCorners': _cornersFromNative(value['finalCorners'])?.toJson(),
         'debugRawFile': relativeArtifact('debugRawPath'),
         'debugMaskFile': relativeArtifact('debugMaskPath'),
         'debugAiOverlayFile': relativeArtifact('debugAiOverlayPath'),
@@ -200,6 +209,7 @@ class PlatformAiDocumentSegmenter implements AiDocumentSegmenter {
         'debugAiRefinedOverlayFile': relativeArtifact(
           'debugAiRefinedOverlayPath',
         ),
+        'debugAiFinalOverlayFile': relativeArtifact('debugAiFinalOverlayPath'),
         'debugSearchRoiFile': relativeArtifact('debugSearchRoiPath'),
         'debugEnvelopeOverlayFile': relativeArtifact(
           'debugEnvelopeOverlayPath',

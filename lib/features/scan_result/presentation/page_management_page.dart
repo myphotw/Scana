@@ -310,7 +310,7 @@ class _PdfSelectionGallery extends StatelessWidget {
           ),
           crossAxisSpacing: 12,
           mainAxisSpacing: 12,
-          childAspectRatio: 0.72,
+          childAspectRatio: 0.66,
         ),
         itemCount: pages.length,
         itemBuilder: (context, index) {
@@ -331,6 +331,7 @@ class _PdfSelectionGallery extends StatelessWidget {
   }
 }
 
+/// Gallery card with controls in a dedicated row outside the image viewport.
 class _GalleryPageCard extends StatelessWidget {
   const _GalleryPageCard({
     super.key,
@@ -363,66 +364,119 @@ class _GalleryPageCard extends StatelessWidget {
           width: selected ? 3 : 1,
         ),
       ),
-      child: InkWell(
-        key: ValueKey('pdfGalleryCard-${page.rawImagePath}'),
-        onTap: onTap,
-        onLongPress: onLongPress,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            ColoredBox(
-              color: colorScheme.surfaceContainerHighest,
-              child: Padding(
-                padding: const EdgeInsets.only(bottom: 42),
-                child: _PageImage(page: page),
-              ),
-            ),
-            if (selected)
-              Positioned(
-                top: 8,
-                right: 8,
-                child: CircleAvatar(
-                  key: ValueKey('pdfSelected-${page.rawImagePath}'),
-                  radius: 15,
-                  backgroundColor: colorScheme.primary,
-                  foregroundColor: colorScheme.onPrimary,
-                  child: const Icon(Icons.check, size: 19),
-                ),
-              ),
-            Positioned(
-              top: 8,
-              left: 8,
-              child: _PageProcessingBadge(page: page),
-            ),
-            Positioned(
-              left: 8,
-              right: 4,
-              bottom: 2,
-              child: Row(
+      child: Column(
+        children: [
+          Expanded(
+            child: InkWell(
+              key: ValueKey('pdfGalleryCard-${page.rawImagePath}'),
+              onTap: onTap,
+              onLongPress: onLongPress,
+              child: Stack(
+                fit: StackFit.expand,
                 children: [
-                  Expanded(child: Text('페이지 ${page.pageNo}')),
-                  IconButton(
-                    tooltip: '크게 보기',
-                    onPressed: onPreview,
-                    icon: const Icon(Icons.zoom_out_map, size: 20),
+                  ColoredBox(
+                    color: colorScheme.surfaceContainerHighest,
+                    child: _PageImage(page: page),
                   ),
-                  IconButton(
-                    key: ValueKey('gallery-quick-corner-${page.rawImagePath}'),
-                    tooltip: '모서리 수정',
-                    onPressed: onEditCorners,
-                    icon: const Icon(Icons.crop_free, size: 20),
-                  ),
-                  IconButton(
-                    tooltip: '페이지 삭제',
-                    onPressed: onDelete,
-                    icon: const Icon(Icons.delete_outline, size: 20),
+                  if (selected)
+                    Positioned(
+                      top: 8,
+                      right: 8,
+                      child: CircleAvatar(
+                        key: ValueKey('pdfSelected-${page.rawImagePath}'),
+                        radius: 15,
+                        backgroundColor: colorScheme.primary,
+                        foregroundColor: colorScheme.onPrimary,
+                        child: const Icon(Icons.check, size: 19),
+                      ),
+                    ),
+                  Positioned(
+                    top: 8,
+                    left: 8,
+                    child: _PageProcessingBadge(page: page),
                   ),
                 ],
               ),
             ),
-          ],
-        ),
+          ),
+          SizedBox(
+            key: ValueKey('gallery-action-row-${page.rawImagePath}'),
+            height: 44,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final compact = constraints.maxWidth < 150;
+                return Row(
+                  children: [
+                    SizedBox(width: compact ? 2 : 8),
+                    if (!compact)
+                      Expanded(
+                        child: Text(
+                          '페이지 ${page.pageNo}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      )
+                    else
+                      const Spacer(),
+                    _GalleryActionButton(
+                      tooltip: '크게 보기',
+                      onPressed: onPreview,
+                      icon: Icons.zoom_out_map,
+                      compact: compact,
+                    ),
+                    _GalleryActionButton(
+                      key: ValueKey(
+                        'gallery-quick-corner-${page.rawImagePath}',
+                      ),
+                      tooltip: '모서리 수정',
+                      onPressed: onEditCorners,
+                      icon: Icons.crop_free,
+                      compact: compact,
+                    ),
+                    _GalleryActionButton(
+                      tooltip: '페이지 삭제',
+                      onPressed: onDelete,
+                      icon: Icons.delete_outline,
+                      compact: compact,
+                    ),
+                    const SizedBox(width: 2),
+                  ],
+                );
+              },
+            ),
+          ),
+        ],
       ),
+    );
+  }
+}
+
+class _GalleryActionButton extends StatelessWidget {
+  const _GalleryActionButton({
+    super.key,
+    required this.tooltip,
+    required this.onPressed,
+    required this.icon,
+    this.compact = false,
+  });
+
+  final String tooltip;
+  final VoidCallback onPressed;
+  final IconData icon;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: tooltip,
+      onPressed: onPressed,
+      icon: Icon(icon, size: 19),
+      padding: const EdgeInsets.all(6),
+      constraints: BoxConstraints.tightFor(
+        width: compact ? 32 : 36,
+        height: 36,
+      ),
+      visualDensity: VisualDensity.compact,
     );
   }
 }

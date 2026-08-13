@@ -56,37 +56,45 @@ void main() {
     if (await root.exists()) await root.delete(recursive: true);
   });
 
-  testWidgets('drag shows magnifier and cancel leaves page unchanged', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      MaterialApp(
-        home: QuickCornerEditPage(sessionManager: manager, pageIndex: 0),
-      ),
-    );
-    await tester.pump();
-    expect(find.byKey(const ValueKey('quick-corner-handle-0')), findsOneWidget);
-    expect(find.byKey(const ValueKey('quick-corner-apply')), findsOneWidget);
+  testWidgets(
+    'drag keeps the image unobstructed and cancel leaves page unchanged',
+    (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: QuickCornerEditPage(sessionManager: manager, pageIndex: 0),
+        ),
+      );
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('quick-corner-handle-0')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('quick-corner-apply')), findsOneWidget);
 
-    final gesture = await tester.startGesture(
-      tester.getCenter(find.byKey(const ValueKey('quick-corner-handle-0'))),
-    );
-    await gesture.moveBy(const Offset(20, 20));
-    await tester.pump();
-    expect(
-      find.byKey(const ValueKey('quick-corner-magnifier')),
-      findsOneWidget,
-    );
-    await gesture.up();
-    await tester.pump();
-    expect(find.byKey(const ValueKey('quick-corner-magnifier')), findsNothing);
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byKey(const ValueKey('quick-corner-handle-0'))),
+      );
+      await gesture.moveBy(const Offset(20, 20));
+      await tester.pump();
+      expect(find.byType(RawMagnifier), findsNothing);
+      expect(
+        find.byKey(const ValueKey('quick-corner-magnifier')),
+        findsNothing,
+      );
+      await gesture.up();
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('quick-corner-magnifier')),
+        findsNothing,
+      );
 
-    await tester.tap(find.byKey(const ValueKey('quick-corner-cancel')));
-    await tester.pumpAndSettle();
-    final page = manager.currentSession!.pages.single;
-    expect(page.cropSource, isNull);
-    expect(page.hasUserAdjustedCorners, isFalse);
-  });
+      await tester.tap(find.byKey(const ValueKey('quick-corner-cancel')));
+      await tester.pumpAndSettle();
+      final page = manager.currentSession!.pages.single;
+      expect(page.cropSource, isNull);
+      expect(page.hasUserAdjustedCorners, isFalse);
+    },
+  );
 
   testWidgets('apply action is exposed by the focused editor', (tester) async {
     await tester.pumpWidget(
@@ -101,6 +109,61 @@ void main() {
     expect(find.text('취소'), findsOneWidget);
     expect(find.text('적용'), findsOneWidget);
   });
+
+  testWidgets('background drag and pinch never move or scale the image', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: QuickCornerEditPage(sessionManager: manager, pageIndex: 0),
+      ),
+    );
+    await tester.pump();
+    final imageFinder = find.byKey(const ValueKey('quick-corner-fixed-image'));
+    final before = tester.getRect(imageFinder);
+    expect(find.byType(InteractiveViewer), findsNothing);
+
+    await tester.dragFrom(before.center, const Offset(45, 30));
+    await tester.pump();
+    expect(tester.getRect(imageFinder), before);
+
+    final first = await tester.startGesture(
+      before.center - const Offset(20, 0),
+    );
+    final second = await tester.startGesture(
+      before.center + const Offset(20, 0),
+    );
+    await first.moveTo(before.center - const Offset(60, 0));
+    await second.moveTo(before.center + const Offset(60, 0));
+    await tester.pump();
+    expect(tester.getRect(imageFinder), before);
+    await first.up();
+    await second.up();
+  });
+
+  testWidgets(
+    'corner drag updates only the handle while image rect stays fixed',
+    (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: QuickCornerEditPage(sessionManager: manager, pageIndex: 0),
+        ),
+      );
+      await tester.pump();
+      final imageFinder = find.byKey(
+        const ValueKey('quick-corner-fixed-image'),
+      );
+      final handleFinder = find.byKey(const ValueKey('quick-corner-handle-0'));
+      final imageBefore = tester.getRect(imageFinder);
+      final handleBefore = tester.getCenter(handleFinder);
+      final gesture = await tester.startGesture(handleBefore);
+      await gesture.moveBy(const Offset(16, 12));
+      await tester.pump();
+      expect(tester.getRect(imageFinder), imageBefore);
+      expect(tester.getCenter(handleFinder), isNot(handleBefore));
+      await gesture.up();
+    },
+  );
 }
 
 const _corners = DocumentCorners(

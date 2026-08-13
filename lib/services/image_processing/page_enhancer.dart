@@ -1,6 +1,7 @@
 import 'package:flutter/services.dart';
 
 import 'package:scana/models/page_enhancement.dart';
+import 'package:scana/models/image_quality.dart';
 
 abstract interface class PageEnhancer {
   Future<PageEnhancementResult> enhance({
@@ -8,6 +9,28 @@ abstract interface class PageEnhancer {
     required String outputImagePath,
     required EnhancementMode mode,
   });
+}
+
+class ScanQualityPipelinePolicy {
+  const ScanQualityPipelinePolicy._();
+
+  static const String losslessIntermediateExtension = 'png';
+  static const double foregroundSharpnessWarningRatio = 0.90;
+
+  static bool isLosslessIntermediatePath(String filePath) =>
+      filePath.toLowerCase().endsWith('.png');
+
+  static bool preservesResolution({
+    required int sourceWidth,
+    required int sourceHeight,
+    required int outputWidth,
+    required int outputHeight,
+  }) => sourceWidth == outputWidth && sourceHeight == outputHeight;
+
+  static bool foregroundSharpnessDropped({
+    required double source,
+    required double output,
+  }) => source > 0 && output < source * foregroundSharpnessWarningRatio;
 }
 
 class UnavailablePageEnhancer implements PageEnhancer {
@@ -79,6 +102,26 @@ class OpenCvPageEnhancer implements PageEnhancer {
       outputHeight: height,
       processingMilliseconds: elapsed,
       stageTimings: Map.unmodifiable(stageTimings),
+      sourceQuality: ImageQualityMetrics.fromNative(value, 'source'),
+      outputQuality: ImageQualityMetrics.fromNative(value, 'output'),
+      outputFormat: value?['outputFormat'] as String?,
+      sharpeningAmount: _optionalFiniteDouble(value?['sharpeningAmount']),
+      foregroundDarkeningAmount: _optionalFiniteDouble(
+        value?['foregroundDarkeningAmount'],
+      ),
+      sourceLuminanceBlend: _optionalFiniteDouble(
+        value?['sourceLuminanceBlend'],
+      ),
     );
+  }
+
+  static double? _optionalFiniteDouble(Object? value) {
+    if (value == null) return null;
+    if (value is! num || !value.isFinite || value < 0 || value > 1) {
+      throw const FormatException(
+        'Page enhancer returned invalid tuning metadata.',
+      );
+    }
+    return value.toDouble();
   }
 }

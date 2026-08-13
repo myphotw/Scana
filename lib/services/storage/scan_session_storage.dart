@@ -13,6 +13,7 @@ import 'package:scana/models/scan_capture_mode.dart';
 import 'package:scana/models/page_enhancement.dart';
 import 'package:scana/models/page_crop.dart';
 import 'package:scana/models/ai_document_segmentation_result.dart';
+import 'package:scana/services/image_processing/page_enhancer.dart';
 
 typedef AppPrivateDirectoryProvider = Future<Directory> Function();
 
@@ -142,10 +143,22 @@ class AppPrivateSessionStorage
               'correctionStatus': page.correctionStatus.name,
               'correctionType': page.correctionType.name,
               'correctionOutcome': page.correctionOutcome.name,
+              if (page.correctionFailureReason != null)
+                'correctionFailureReason': page.correctionFailureReason!,
+              'perspectiveApplied': page.perspectiveApplied,
+              'curvatureState': page.curvatureState.name,
+              'curvedApplied': page.curvedApplied,
+              if (page.curvedConfidence != null)
+                'curvedConfidence': page.curvedConfidence!,
+              if (page.curvatureMagnitude != null)
+                'curvatureMagnitude': page.curvatureMagnitude!,
+              if (page.curvedRejectReason != null)
+                'curvedRejectReason': page.curvedRejectReason!,
               if (page.enhancedImagePath != null)
                 'enhancedImageFile': path.basename(page.enhancedImagePath!),
               'enhancementMode': page.enhancementMode.name,
               'enhancementStatus': page.enhancementStatus.name,
+              'enhancementApplied': page.enhancementApplied,
             },
           )
           .toList(),
@@ -262,6 +275,26 @@ class AppPrivateSessionStorage
         var correctionStatus = _correctionStatusFromJson(
           pageData['correctionStatus'],
         );
+        final correctionFailureReason =
+            pageData['correctionFailureReason'] as String?;
+        final perspectiveApplied =
+            pageData['perspectiveApplied'] as bool? ??
+            correctionStatus == CorrectionStatus.completed;
+        final curvatureState = CurvatureState.values.firstWhere(
+          (state) => state.name == pageData['curvatureState'],
+          orElse: () => correctionType == CorrectionType.curved
+              ? CurvatureState.strongCurve
+              : CurvatureState.none,
+        );
+        final curvedApplied =
+            pageData['curvedApplied'] as bool? ??
+            correctionType == CorrectionType.curved &&
+                correctionStatus == CorrectionStatus.completed;
+        final curvedConfidence = (pageData['curvedConfidence'] as num?)
+            ?.toDouble();
+        final curvatureMagnitude = (pageData['curvatureMagnitude'] as num?)
+            ?.toDouble();
+        final curvedRejectReason = pageData['curvedRejectReason'] as String?;
         final enhancedImageFile = pageData['enhancedImageFile'] as String?;
         final enhancementMode = _enhancementModeFromJson(
           pageData['enhancementMode'],
@@ -269,6 +302,9 @@ class AppPrivateSessionStorage
         var enhancementStatus = _enhancementStatusFromJson(
           pageData['enhancementStatus'],
         );
+        final enhancementApplied =
+            pageData['enhancementApplied'] as bool? ??
+            enhancementStatus == EnhancementStatus.completed;
         if (pageNo == null ||
             rawImageFile == null ||
             !_isRelativeFileName(rawImageFile) ||
@@ -351,9 +387,19 @@ class AppPrivateSessionStorage
             correctionStatus: correctionStatus,
             correctionType: correctionType,
             correctionOutcome: correctionOutcome,
+            correctionFailureReason: correctionFailureReason,
+            perspectiveApplied: perspectiveApplied,
+            curvatureState: curvatureState,
+            curvedApplied: curvedApplied,
+            curvedConfidence: curvedConfidence,
+            curvatureMagnitude: curvatureMagnitude,
+            curvedRejectReason: curvedRejectReason,
             enhancedImagePath: enhancedImagePath,
             enhancementMode: enhancementMode,
             enhancementStatus: enhancementStatus,
+            enhancementApplied:
+                enhancementApplied &&
+                enhancementStatus == EnhancementStatus.completed,
           ),
         );
       }
@@ -457,17 +503,19 @@ class AppPrivateSessionStorage
     final suffix = rawStem.startsWith('raw_')
         ? rawStem.substring('raw_'.length)
         : rawStem;
+    const extension = ScanQualityPipelinePolicy.losslessIntermediateExtension;
     final baseName = type == CorrectionType.perspective
-        ? 'corrected_$suffix.jpg'
-        : 'corrected_curved_$suffix.jpg';
+        ? 'corrected_$suffix.$extension'
+        : 'corrected_curved_$suffix.$extension';
     var finalName = baseName;
     var revision = 2;
     while (await File(path.join(directory.path, finalName)).exists()) {
-      finalName = '${path.basenameWithoutExtension(baseName)}_$revision.jpg';
+      finalName =
+          '${path.basenameWithoutExtension(baseName)}_$revision.$extension';
       revision++;
     }
     return CorrectionOutputTarget(
-      workingPath: path.join(directory.path, '.$finalName.pending.jpg'),
+      workingPath: path.join(directory.path, '.$finalName.pending.$extension'),
       finalPath: path.join(directory.path, finalName),
     );
   }
@@ -509,15 +557,17 @@ class AppPrivateSessionStorage
       EnhancementMode.grayscale => '_grayscale',
       EnhancementMode.blackWhite => '_bw',
     };
-    final baseName = 'enhanced${modeToken}_$suffix.jpg';
+    const extension = ScanQualityPipelinePolicy.losslessIntermediateExtension;
+    final baseName = 'enhanced${modeToken}_$suffix.$extension';
     var finalName = baseName;
     var revision = 2;
     while (await File(path.join(directory.path, finalName)).exists()) {
-      finalName = '${path.basenameWithoutExtension(baseName)}_$revision.jpg';
+      finalName =
+          '${path.basenameWithoutExtension(baseName)}_$revision.$extension';
       revision++;
     }
     return EnhancementOutputTarget(
-      workingPath: path.join(directory.path, '.$finalName.pending.jpg'),
+      workingPath: path.join(directory.path, '.$finalName.pending.$extension'),
       finalPath: path.join(directory.path, finalName),
     );
   }
@@ -560,12 +610,12 @@ class AppPrivateSessionStorage
     final correctionFilePattern = RegExp(
       r'^\.?corrected(?:_curved)?_' +
           RegExp.escape(suffix) +
-          r'(?:_\d+)?\.jpg(?:\.pending\.jpg)?$',
+          r'(?:_\d+)?\.(?:jpg|png)(?:\.pending\.(?:jpg|png))?$',
     );
     final enhancementFilePattern = RegExp(
       r'^\.?enhanced(?:_(?:original|grayscale|bw))?_' +
           RegExp.escape(suffix) +
-          r'(?:_\d+)?\.jpg(?:\.pending\.jpg)?$',
+          r'(?:_\d+)?\.(?:jpg|png)(?:\.pending\.(?:jpg|png))?$',
     );
     final directory = Directory(parentDirectory);
     if (await directory.exists()) {
@@ -582,6 +632,12 @@ class AppPrivateSessionStorage
       if (await file.exists()) {
         await file.delete();
       }
+    }
+    final qualityDirectory = Directory(
+      path.join(parentDirectory, 'debug_quality', rawStem),
+    );
+    if (await qualityDirectory.exists()) {
+      await qualityDirectory.delete(recursive: true);
     }
   }
 

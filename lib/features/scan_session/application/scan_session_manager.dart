@@ -23,8 +23,11 @@ import 'package:scana/services/image_processing/spread_capture_splitter.dart';
 import 'package:scana/services/image_processing/page_crop_decision.dart';
 import 'package:scana/services/image_processing/capture_boundary_mapper.dart';
 import 'package:scana/services/image_processing/ai_document_segmenter.dart';
+import 'package:scana/services/image_processing/ai_primary_crop_policy.dart';
+import 'package:scana/services/image_processing/capture_guide_policy.dart';
 import 'package:scana/services/storage/scan_session_storage.dart';
 import 'package:scana/services/diagnostics/debug_diagnostics.dart';
+import 'package:scana/services/diagnostics/scan_quality_diagnostics.dart';
 
 typedef SessionIdGenerator = String Function();
 typedef Clock = DateTime Function();
@@ -266,20 +269,17 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
     final session = _requireSession();
     final index = session.pages.indexOf(page);
     if (index >= 0 && page.documentCorners != null) {
-      final perspectiveStopwatch = Stopwatch()..start();
-      final corrected = await correctPageAt(
+      final correctionStopwatch = Stopwatch()..start();
+      await _runAutomaticCorrectionPipelineAt(
         index,
-        CorrectionType.perspective,
-        enhanceAfterCorrection: false,
+        enhancementMode: EnhancementMode.scanColor,
       );
-      perspectiveStopwatch.stop();
+      correctionStopwatch.stop();
       DebugDiagnostics.instance.log(
         'IMAGE_PROCESSING',
-        'Perspective: ${perspectiveStopwatch.elapsedMilliseconds} ms',
+        'Automatic correction: ${correctionStopwatch.elapsedMilliseconds} ms',
       );
-      if (corrected) {
-        await enhancePageAt(index, EnhancementMode.scanColor);
-      }
+      // Curvature analysis and Enhancement are part of the same automatic job.
     }
     totalStopwatch.stop();
     DebugDiagnostics.instance.log(
@@ -335,7 +335,7 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
     final page = await addRawCapture(
       capturedImagePath,
       pageSide: pageSide,
-      captureGuideRegion: SpreadPageDetectionPolicy.expectedRegion(pageSide),
+      captureGuideRegion: CaptureGuidePolicy.spreadForRoi(pageSide),
       stablePreviewBoundary: stablePreviewBoundary,
       captureBoundarySnapshot: captureBoundarySnapshot,
     );
@@ -346,13 +346,11 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
     final detectedPage = session.pages[index];
     if (detectedPage.documentCorners != null &&
         detectedPage.cropSource != CropSource.guideFallback) {
-      final corrected = await correctPageAt(
+      final corrected = await _runAutomaticCorrectionPipelineAt(
         index,
-        CorrectionType.perspective,
-        enhanceAfterCorrection: false,
+        enhancementMode: EnhancementMode.scanColor,
       );
       if (corrected) {
-        await enhancePageAt(index, EnhancementMode.scanColor);
         return session.pages[index];
       }
     }
@@ -362,7 +360,10 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
       pageSide,
     );
     if (fallbackCreated) {
-      await enhancePageAt(index, EnhancementMode.scanColor);
+      await _completeAutomaticPipelineFromPerspectiveAt(
+        index,
+        enhancementMode: EnhancementMode.scanColor,
+      );
     }
     return session.pages[index];
   }
@@ -471,22 +472,31 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
               jpegWidth: detection.sourceWidth,
               jpegHeight: detection.sourceHeight,
             );
-      final decision = PageCropDecisionPolicy.decide(
+      final openCvDecision = PageCropDecisionPolicy.decide(
         detection: detection,
         guideCorners: guideCorners ?? previousPage.documentCorners,
         captureBoundary: captureBoundary,
+      );
+      final aiSegmentation = await _runAiComparison(
+        imagePath: rawImagePath,
+        pageSide: null,
+        openCvCorners: openCvDecision?.corners,
+        expectedGuideCorners: guideCorners,
+        openCvConfidence: detection.confidence,
+        cropSource: openCvDecision?.source,
+      );
+      final decision = _selectProductionCrop(
+        aiSegmentation: aiSegmentation,
+        openCvDecision: openCvDecision,
+        sourceWidth: detection.sourceWidth,
+        sourceHeight: detection.sourceHeight,
+        pageSide: null,
+        expectedGuideCorners: guideCorners,
       );
       if (decision == null) {
         await _storage.deletePageFiles(candidate);
         return false;
       }
-      final aiSegmentation = await _runAiComparison(
-        imagePath: rawImagePath,
-        pageSide: null,
-        openCvCorners: decision.corners,
-        openCvConfidence: detection.confidence,
-        cropSource: decision.source,
-      );
       candidate = candidate
           .withDetection(
             detection,
@@ -510,9 +520,13 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
         return false;
       }
 
-      final enhanced = await _createEnhancedResult(
+      final automaticGeometry = await _createAutomaticCurvedResult(
         session,
         corrected,
+      );
+      final enhanced = await _createEnhancedResult(
+        session,
+        automaticGeometry,
         EnhancementMode.scanColor,
       );
       session.replacePageAt(index, enhanced);
@@ -578,10 +592,9 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
     final previousPage = session.pages[index];
     final stopwatch = Stopwatch()..start();
     await updateDocumentCornersAt(index, corners);
-    final corrected = await correctPageAt(
+    final corrected = await _runAutomaticCorrectionPipelineAt(
       index,
-      CorrectionType.perspective,
-      enhanceAfterCorrection: true,
+      enhancementMode: previousPage.enhancementMode,
     );
     if (!corrected) {
       session.replacePageAt(index, previousPage);
@@ -602,6 +615,296 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
   Future<bool> detectPageAt(int index) async {
     _ensureOpen();
     return _detectPage(_requireSession(), index);
+  }
+
+  Future<bool> _runAutomaticCorrectionPipelineAt(
+    int index, {
+    required EnhancementMode enhancementMode,
+  }) async {
+    final perspectiveApplied = await correctPageAt(
+      index,
+      CorrectionType.perspective,
+      enhanceAfterCorrection: false,
+    );
+    if (!perspectiveApplied) return false;
+    await _completeAutomaticPipelineFromPerspectiveAt(
+      index,
+      enhancementMode: enhancementMode,
+    );
+    return true;
+  }
+
+  Future<void> _completeAutomaticPipelineFromPerspectiveAt(
+    int index, {
+    required EnhancementMode enhancementMode,
+  }) async {
+    final session = _requireSession();
+    final geometryResult = await _createAutomaticCurvedResult(
+      session,
+      session.pages[index],
+    );
+    session.replacePageAt(index, geometryResult);
+    await _storage.saveSession(session);
+    notifyListeners();
+    await enhancePageAt(index, enhancementMode);
+  }
+
+  Future<ScanPage> _createAutomaticCurvedResult(
+    ScanSession session,
+    ScanPage perspectivePage,
+  ) async {
+    final perspectivePath = perspectivePage.correctedImagePath;
+    if (perspectivePath == null) return perspectivePage;
+    CorrectionOutputTarget? outputTarget;
+    final stopwatch = Stopwatch()..start();
+    try {
+      outputTarget = await _storage.prepareCorrectionOutput(
+        sessionId: session.id,
+        rawImagePath: perspectivePage.rawImagePath,
+        type: CorrectionType.curved,
+      );
+      final sourceWidth = _imageWidthFromPage(perspectivePage);
+      final sourceHeight = _imageHeightFromPage(perspectivePage);
+      final curvatureBoundary = _curvatureBoundaryForPage(perspectivePage);
+      final result = await _pageCorrector.correct(
+        sourceImagePath: perspectivePath,
+        outputImagePath: outputTarget.workingPath,
+        // The raster is already rectified, but raw-coordinate corners and the
+        // owned paper contour preserve normalized outer-edge curvature.
+        corners:
+            perspectivePage.documentCorners ??
+            _fullImageCornersFromSize(sourceWidth, sourceHeight),
+        type: CorrectionType.curved,
+        boundaryMode: curvatureBoundary == null
+            ? PageBoundaryMode.insetFallback
+            : PageBoundaryMode.detected,
+        pageBoundary: curvatureBoundary,
+      );
+      final state = result.curvatureState;
+      if (state != CurvatureState.mildCurve &&
+          state != CurvatureState.strongCurve) {
+        final artifactStem = path.basenameWithoutExtension(
+          outputTarget.workingPath,
+        );
+        await _storage.discardCorrectionOutput(outputTarget);
+        stopwatch.stop();
+        final fallbackState = state == CurvatureState.flat
+            ? CurvatureState.flat
+            : CurvatureState.unreliable;
+        _logAutomaticCurvature(
+          perspectivePage,
+          result.diagnostics,
+          stopwatch.elapsedMilliseconds,
+          fallbackState,
+          false,
+          'missing_or_non_applicable_state',
+        );
+        await ScanQualityDiagnostics.recordCurvatureDecision(
+          page: perspectivePage,
+          perspectivePath: perspectivePath,
+          state: fallbackState,
+          applied: false,
+          diagnostics: result.diagnostics,
+          rejectReason: 'missing_or_non_applicable_state',
+          nativeArtifactStem: artifactStem,
+        );
+        return perspectivePage.withAutomaticCurvature(
+          state: fallbackState,
+          applied: false,
+          confidence: result.curvedConfidence,
+          magnitude: result.curvatureMagnitude,
+          rejectReason: 'missing_or_non_applicable_state',
+        );
+      }
+      final curvedPath = await _storage.commitCorrectionOutput(outputTarget);
+      await ScanQualityDiagnostics.recordCorrection(
+        page: perspectivePage,
+        type: CorrectionType.curved,
+        sourcePath: perspectivePath,
+        outputPath: curvedPath,
+        result: result,
+      );
+      stopwatch.stop();
+      _logAutomaticCurvature(
+        perspectivePage,
+        result.diagnostics,
+        stopwatch.elapsedMilliseconds,
+        state,
+        true,
+        null,
+      );
+      await ScanQualityDiagnostics.recordCurvatureDecision(
+        page: perspectivePage,
+        perspectivePath: perspectivePath,
+        curvedPath: curvedPath,
+        state: state,
+        applied: true,
+        diagnostics: result.diagnostics,
+        nativeArtifactStem: path.basenameWithoutExtension(
+          outputTarget.workingPath,
+        ),
+      );
+      return perspectivePage.withAutomaticCurvature(
+        state: state,
+        applied: true,
+        confidence: result.curvedConfidence,
+        magnitude: result.curvatureMagnitude,
+        correctedImagePath: curvedPath,
+      );
+    } on Object catch (error) {
+      final artifactStem = outputTarget == null
+          ? null
+          : path.basenameWithoutExtension(outputTarget.workingPath);
+      if (outputTarget != null) {
+        try {
+          await _storage.discardCorrectionOutput(outputTarget);
+        } on Object {
+          // Perspective remains the confirmed geometry fallback.
+        }
+      }
+      stopwatch.stop();
+      final failure = error is PageCorrectionFailure ? error : null;
+      final diagnostics = failure?.diagnostics ?? const <String, Object>{};
+      final state = _curvatureStateFromFailure(failure);
+      final rejectReason =
+          diagnostics['rejectReason'] as String? ??
+          diagnostics['rejectionReason'] as String? ??
+          failure?.reason ??
+          'curvature_analysis_failed';
+      _logAutomaticCurvature(
+        perspectivePage,
+        diagnostics,
+        stopwatch.elapsedMilliseconds,
+        state,
+        false,
+        rejectReason,
+      );
+      await ScanQualityDiagnostics.recordCurvatureDecision(
+        page: perspectivePage,
+        perspectivePath: perspectivePath,
+        state: state,
+        applied: false,
+        diagnostics: diagnostics,
+        rejectReason: rejectReason,
+        nativeArtifactStem: artifactStem,
+      );
+      return perspectivePage.withAutomaticCurvature(
+        state: state,
+        applied: false,
+        confidence: (diagnostics['confidence'] as num?)?.toDouble(),
+        magnitude: (diagnostics['curvatureMagnitude'] as num?)?.toDouble(),
+        rejectReason: rejectReason,
+      );
+    }
+  }
+
+  static CurvatureState _curvatureStateFromFailure(
+    PageCorrectionFailure? failure,
+  ) {
+    final serialized = failure?.diagnostics['curvatureState'];
+    return CurvatureState.values.firstWhere(
+      (state) => state.name == serialized,
+      orElse: () => failure?.outcome == CorrectionOutcome.nearlyFlat
+          ? CurvatureState.flat
+          : CurvatureState.unreliable,
+    );
+  }
+
+  static void _logAutomaticCurvature(
+    ScanPage page,
+    Map<String, Object> diagnostics,
+    int totalMilliseconds,
+    CurvatureState state,
+    bool applied,
+    String? rejectReason,
+  ) {
+    DebugDiagnostics.instance.log(
+      'CURVED_AUTO',
+      'page=${page.pageNo} state=${state.name} applied=$applied '
+          'detectMs=${diagnostics['detectMs'] ?? totalMilliseconds} '
+          'dewarpMs=${diagnostics['dewarpMs'] ?? 0} '
+          'combinedMagnitude=${diagnostics['combinedMagnitude'] ?? diagnostics['curvatureMagnitude'] ?? 0} '
+          'pageContourMagnitude=${diagnostics['pageContourMagnitude'] ?? 0} '
+          'topCurve=${diagnostics['topCurve'] ?? 0} '
+          'bottomCurve=${diagnostics['bottomCurve'] ?? 0} '
+          'spineCurve=${diagnostics['spineCurve'] ?? 0} '
+          'internalLineMagnitude=${diagnostics['internalLineMagnitude'] ?? 0} '
+          'effectiveDeformationMagnitude=${diagnostics['effectiveDeformationMagnitude'] ?? 0} '
+          'topRawSign=${diagnostics['topRawSign'] ?? 0} '
+          'bottomRawSign=${diagnostics['bottomRawSign'] ?? 0} '
+          'spineRawSign=${diagnostics['spineRawSign'] ?? 0} '
+          'topNormalizedSign=${diagnostics['topNormalizedSign'] ?? 0} '
+          'bottomNormalizedSign=${diagnostics['bottomNormalizedSign'] ?? 0} '
+          'spineNormalizedSign=${diagnostics['spineNormalizedSign'] ?? 0} '
+          'directionConflictBeforeNormalization=${diagnostics['directionConflictBeforeNormalization'] ?? false} '
+          'directionConflictAfterNormalization=${diagnostics['directionConflictAfterNormalization'] ?? false} '
+          'signConvention=${diagnostics['signConvention'] ?? "unknown"} '
+          'horizontalDirectionVotes=${diagnostics['horizontalDirectionVotes'] ?? const <String, Object>{}} '
+          'spineUsedForDirectionConflict=${diagnostics['spineUsedForDirectionConflict'] ?? false} '
+          'coverage=${diagnostics['coverage'] ?? 0} '
+          'evidence=${diagnostics['evidenceCount'] ?? 0} '
+          'consistency=${diagnostics['consistency'] ?? 0} '
+          'confidence=${diagnostics['confidence'] ?? 0} '
+          'deformationStrength=${diagnostics['deformationStrength'] ?? 0} '
+          'straightnessBefore=${diagnostics['perspectiveStraightness'] ?? 0} '
+          'straightnessAfter=${diagnostics['curvedStraightness'] ?? 0} '
+          'geometryBefore=${diagnostics['geometryBefore'] ?? 0} '
+          'geometryAfter=${diagnostics['geometryAfter'] ?? 0} '
+          'rejectReason=${rejectReason ?? "none"} totalMs=$totalMilliseconds',
+    );
+  }
+
+  static int _imageWidthFromPage(ScanPage page) {
+    final qualityWidth = page.documentSourceWidth;
+    return qualityWidth != null && qualityWidth > 1 ? qualityWidth : 2;
+  }
+
+  static int _imageHeightFromPage(ScanPage page) {
+    final qualityHeight = page.documentSourceHeight;
+    return qualityHeight != null && qualityHeight > 1 ? qualityHeight : 2;
+  }
+
+  static DocumentCorners _fullImageCornersFromSize(int width, int height) {
+    final right = (width - 1).toDouble();
+    final bottom = (height - 1).toDouble();
+    return DocumentCorners(
+      topLeft: const DocumentPoint(0, 0),
+      topRight: DocumentPoint(right, 0),
+      bottomRight: DocumentPoint(right, bottom),
+      bottomLeft: DocumentPoint(0, bottom),
+    );
+  }
+
+  static PageBoundary? _curvatureBoundaryForPage(ScanPage page) {
+    final corners = page.documentCorners;
+    final width = page.documentSourceWidth;
+    final height = page.documentSourceHeight;
+    final ai = page.aiSegmentationResult;
+    if (corners != null &&
+        width != null &&
+        height != null &&
+        ai != null &&
+        ai.paperContour.isNotEmpty) {
+      final spineSide = switch (ai.pageSide) {
+        'left' => PageBoundarySide.right,
+        'right' => PageBoundarySide.left,
+        _ => null,
+      };
+      final boundary = PageContourGeometryEvidence.boundaryFromContour(
+        contour: ai.paperContour,
+        corners: corners,
+        sourceWidth: width,
+        sourceHeight: height,
+        spineSide: spineSide,
+      );
+      if (boundary != null) return boundary;
+    }
+    final existing = page.pageBoundary;
+    if (existing != null &&
+        (existing.top.length >= 4 || existing.bottom.length >= 4)) {
+      return existing;
+    }
+    return null;
   }
 
   Future<bool> correctPageAt(
@@ -626,6 +929,8 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
 
     CorrectionOutputTarget? outputTarget;
     String? protectedPerspectivePath;
+    PageCorrectionResult? protectedPerspectiveResult;
+    final enhancementMode = page.enhancementMode;
     try {
       session.updateCorrectionAt(
         index,
@@ -647,7 +952,7 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
           rawImagePath: page.rawImagePath,
           type: CorrectionType.perspective,
         );
-        await _pageCorrector.correct(
+        protectedPerspectiveResult = await _pageCorrector.correct(
           sourceImagePath: page.rawImagePath,
           outputImagePath: outputTarget.workingPath,
           corners: corners,
@@ -657,6 +962,13 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
         );
         protectedPerspectivePath = await _storage.commitCorrectionOutput(
           outputTarget,
+        );
+        await ScanQualityDiagnostics.recordCorrection(
+          page: page,
+          type: CorrectionType.perspective,
+          sourcePath: page.rawImagePath,
+          outputPath: protectedPerspectivePath,
+          result: protectedPerspectiveResult,
         );
         outputTarget = null;
         correctionSourcePath = protectedPerspectivePath;
@@ -675,16 +987,49 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
         rawImagePath: page.rawImagePath,
         type: type,
       );
+      final curvedInputCorners = protectedPerspectiveResult == null
+          ? corners
+          : _fullImageCorners(protectedPerspectiveResult);
+      final curvatureBoundary = type == CorrectionType.curved
+          ? _curvatureBoundaryForPage(page)
+          : null;
       final correctionResult = await _pageCorrector.correct(
         sourceImagePath: correctionSourcePath,
         outputImagePath: outputTarget.workingPath,
-        corners: corners,
+        corners: type == CorrectionType.curved && curvatureBoundary != null
+            ? corners
+            : curvedInputCorners,
         type: type,
-        boundaryMode: boundaryMode,
-        pageBoundary: page.pageBoundary,
+        boundaryMode: type == CorrectionType.curved
+            ? curvatureBoundary == null
+                  ? PageBoundaryMode.insetFallback
+                  : PageBoundaryMode.detected
+            : boundaryMode,
+        // Only normalized deviation from each raw contour chord is reused;
+        // absolute RAW coordinates are never applied to the rectified raster.
+        pageBoundary: type == CorrectionType.curved
+            ? curvatureBoundary
+            : page.pageBoundary,
       );
+      if (protectedPerspectiveResult != null &&
+          !CorrectionOutputSanity.preservesPerspectiveCanvas(
+            perspective: protectedPerspectiveResult,
+            curved: correctionResult,
+          )) {
+        throw const PageCorrectionFailure(
+          CorrectionOutcome.unsafeDeformation,
+          'Curved output changed the perspective canvas unexpectedly.',
+        );
+      }
       final correctedImagePath = await _storage.commitCorrectionOutput(
         outputTarget,
+      );
+      await ScanQualityDiagnostics.recordCorrection(
+        page: page,
+        type: type,
+        sourcePath: correctionSourcePath,
+        outputPath: correctedImagePath,
+        result: correctionResult,
       );
       session.updateCorrectionAt(
         index,
@@ -693,11 +1038,17 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
         correctedImagePath: correctedImagePath,
         outcome: correctionResult.outcome,
       );
+      if (type == CorrectionType.curved) {
+        DebugDiagnostics.instance.log(
+          'CURVED_CORRECTION',
+          'accepted ${_diagnosticsSummary(correctionResult.diagnostics)}',
+        );
+      }
       await _storage.saveSession(session);
       notifyListeners();
       if (enhanceAfterCorrection) {
         try {
-          await enhancePageAt(index, session.pages[index].enhancementMode);
+          await enhancePageAt(index, enhancementMode);
         } on Object catch (error) {
           DebugDiagnostics.instance.log(
             'IMAGE_PROCESSING',
@@ -724,16 +1075,52 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
             : type == CorrectionType.curved
             ? CorrectionOutcome.lowConfidence
             : CorrectionOutcome.none,
+        failureReason: error is PageCorrectionFailure
+            ? error.reason
+            : 'correction_failed',
       );
+      if (type == CorrectionType.curved) {
+        DebugDiagnostics.instance.log(
+          'CURVED_CORRECTION',
+          'rejected reason=${error is PageCorrectionFailure ? error.reason : "correction_failed"} '
+              '${error is PageCorrectionFailure ? _diagnosticsSummary(error.diagnostics) : "error=$error"}',
+        );
+      }
       try {
         await _storage.saveSession(session);
       } on Object {
         // Raw page and previous correction remain available in memory and disk.
       }
       notifyListeners();
+      if (protectedPerspectivePath != null && enhanceAfterCorrection) {
+        try {
+          await enhancePageAt(index, enhancementMode);
+        } on Object catch (enhancementError) {
+          DebugDiagnostics.instance.log(
+            'IMAGE_PROCESSING',
+            'Perspective fallback enhancement failed: $enhancementError',
+          );
+        }
+      }
       return false;
     }
   }
+
+  static DocumentCorners _fullImageCorners(PageCorrectionResult result) {
+    final right = (result.outputWidth - 1).toDouble();
+    final bottom = (result.outputHeight - 1).toDouble();
+    return DocumentCorners(
+      topLeft: const DocumentPoint(0, 0),
+      topRight: DocumentPoint(right, 0),
+      bottomRight: DocumentPoint(right, bottom),
+      bottomLeft: DocumentPoint(0, bottom),
+    );
+  }
+
+  static String _diagnosticsSummary(Map<String, Object> diagnostics) =>
+      diagnostics.entries
+          .map((entry) => '${entry.key}=${entry.value}')
+          .join(' ');
 
   Future<bool> enhancePageAt(int index, EnhancementMode mode) async {
     _ensureOpen();
@@ -877,21 +1264,35 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
               jpegHeight: detection.sourceHeight,
               pageSide: pageSide,
             );
-      final decision = PageCropDecisionPolicy.decide(
+      final openCvDecision = PageCropDecisionPolicy.decide(
         detection: detection,
         guideCorners: guideCorners ?? session.pages[index].documentCorners,
         captureBoundary: captureBoundary,
         pageSide: pageSide,
       );
-      final resolvedBoundary = decision?.boundary;
-      final resolvedCorners = decision?.corners;
       final aiSegmentation = await _runAiComparison(
         imagePath: rawImagePath,
         pageSide: pageSide,
-        openCvCorners: resolvedCorners,
+        openCvCorners: openCvDecision?.corners,
+        expectedGuideCorners: guideCorners,
         openCvConfidence: detection.confidence,
-        cropSource: decision?.source,
+        cropSource: openCvDecision?.source,
       );
+      final decision = _selectProductionCrop(
+        aiSegmentation: aiSegmentation,
+        openCvDecision: openCvDecision,
+        sourceWidth: detection.sourceWidth,
+        sourceHeight: detection.sourceHeight,
+        pageSide: pageSide,
+        expectedGuideCorners: guideCorners,
+      );
+      final aiSelection = AiPrimaryCropPolicy.select(
+        aiSegmentation,
+        pageSide: pageSide,
+        expectedGuideCorners: guideCorners,
+      );
+      final resolvedBoundary = decision?.boundary;
+      final resolvedCorners = decision?.corners;
       final finalMetrics = _cornerMetrics(
         resolvedCorners,
         detection.sourceWidth,
@@ -918,6 +1319,8 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
             'stableLiveAvailable=${effectivePreviewBoundary != null} '
             'stableLiveConfidence=${effectivePreviewBoundary?.confidence.toStringAsFixed(3) ?? "0.000"} '
             'selectedCropSource=${decision?.source.name ?? "none"} '
+            'openCvCandidateSource=${openCvDecision?.source.name ?? "none"} '
+            'aiFinalSource=${aiSegmentation?.finalSource?.serializedName ?? "none"} '
             'refineAttempted=${decision?.refineAttempted ?? false} '
             'refineAccepted=${decision?.refineAccepted ?? false} '
             'refineRejectedReason=${decision?.refineRejectedReason ?? "not_attempted"} '
@@ -928,17 +1331,19 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
             'finalAreaRatio=${finalMetrics.$3.toStringAsFixed(3)} '
             'fallbackReason=${decision?.fallbackReason ?? "no_safe_crop"}',
       );
-      if (decision?.source == CropSource.captureLiveBoundary) {
-        final areaDifference = decision!.areaRatioCapture <= 0
+      if (aiSelection == null &&
+          openCvDecision?.source == CropSource.captureLiveBoundary) {
+        final areaDifference = openCvDecision!.areaRatioCapture <= 0
             ? 0.0
-            : ((decision.areaRatioFinal - decision.areaRatioCapture).abs() /
-                      decision.areaRatioCapture) *
+            : ((openCvDecision.areaRatioFinal - openCvDecision.areaRatioCapture)
+                          .abs() /
+                      openCvDecision.areaRatioCapture) *
                   100;
-        if (decision.cornerDeltaPercent > 4 || areaDifference > 8) {
+        if (openCvDecision.cornerDeltaPercent > 4 || areaDifference > 8) {
           DebugDiagnostics.instance.log(
             'CAPTURE_BOUNDARY_WARNING',
             'final crop differs from displayed live boundary by '
-                'corner=${decision.cornerDeltaPercent.toStringAsFixed(2)}% '
+                'corner=${openCvDecision.cornerDeltaPercent.toStringAsFixed(2)}% '
                 'area=${areaDifference.toStringAsFixed(2)}%',
           );
         }
@@ -966,10 +1371,59 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
     }
   }
 
+  PageCropDecision? _selectProductionCrop({
+    required AiDocumentSegmentationResult? aiSegmentation,
+    required PageCropDecision? openCvDecision,
+    required int sourceWidth,
+    required int sourceHeight,
+    required DocumentPageSide? pageSide,
+    DocumentCorners? expectedGuideCorners,
+  }) {
+    final aiSelection = AiPrimaryCropPolicy.select(
+      aiSegmentation,
+      pageSide: pageSide,
+      expectedGuideCorners: expectedGuideCorners,
+    );
+    if (aiSelection != null) {
+      return PageCropDecision(
+        source: aiSelection.source,
+        corners: aiSelection.corners,
+        boundary: _boundaryFromCorners(
+          aiSelection.corners,
+          sourceWidth,
+          sourceHeight,
+          confidence: aiSelection.confidence,
+        ),
+        fallbackReason: 'none',
+      );
+    }
+    // Tests/embedders may deliberately run without the AI service. Preserve
+    // their legacy source semantics; `openCvFallback` means AI was attempted.
+    if (aiSegmentation == null) return openCvDecision;
+    if (openCvDecision == null ||
+        openCvDecision.source == CropSource.guideFallback) {
+      return openCvDecision;
+    }
+    return PageCropDecision(
+      source: CropSource.openCvFallback,
+      corners: openCvDecision.corners,
+      boundary: openCvDecision.boundary,
+      captureBoundary: openCvDecision.captureBoundary,
+      fallbackReason: 'ai_final_unavailable',
+      refineAttempted: openCvDecision.refineAttempted,
+      refineAccepted: openCvDecision.refineAccepted,
+      refineRejectedReason: openCvDecision.refineRejectedReason,
+      cornerDeltaPercent: openCvDecision.cornerDeltaPercent,
+      areaRatioCapture: openCvDecision.areaRatioCapture,
+      areaRatioFinal: openCvDecision.areaRatioFinal,
+    );
+  }
+
   Future<AiDocumentSegmentationResult?> _runAiComparison({
     required String imagePath,
     required DocumentPageSide? pageSide,
     required DocumentCorners? openCvCorners,
+    DocumentCorners? expectedGuideCorners,
     required double openCvConfidence,
     required CropSource? cropSource,
   }) async {
@@ -982,6 +1436,7 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
       imagePath,
       pageSide: pageSide,
       openCvCorners: openCvCorners,
+      expectedGuideCorners: expectedGuideCorners,
       debugOutputDirectory: AiDebugArtifactPolicy.outputDirectory(
         sessionDirectory,
         debugBuild: kDebugMode,
@@ -1030,6 +1485,9 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
           'refinedStatus=${result.refinedStatus.serializedName} '
           'rawCorners=${_cornersSummary(result.corners, result.sourceWidth, result.sourceHeight)} '
           'refinedCorners=${_cornersSummary(result.refinedCorners, result.sourceWidth, result.sourceHeight)} '
+          'aiFinalSource=${result.finalSource?.serializedName ?? "none"} '
+          'aiFinalCorners=${_cornersSummary(result.finalCorners, result.sourceWidth, result.sourceHeight)} '
+          'edgeVisibility=${result.edgeVisibilities.values.map((edge) => "${edge.edge.name}:${edge.status.serializedName}").join(",")} '
           'failureReason=${result.refinementFailureReason ?? "none"}',
     );
     return result;
@@ -1055,7 +1513,7 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
         rawImagePath: page.rawImagePath,
         type: CorrectionType.perspective,
       );
-      await _pageCorrector.correct(
+      final result = await _pageCorrector.correct(
         sourceImagePath: page.rawImagePath,
         outputImagePath: outputTarget.workingPath,
         corners: corners,
@@ -1065,6 +1523,13 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
       );
       final correctedImagePath = await _storage.commitCorrectionOutput(
         outputTarget,
+      );
+      await ScanQualityDiagnostics.recordCorrection(
+        page: page,
+        type: CorrectionType.perspective,
+        sourcePath: page.rawImagePath,
+        outputPath: correctedImagePath,
+        result: result,
       );
       return page.withCorrection(
         status: CorrectionStatus.completed,
@@ -1122,6 +1587,12 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
       );
       final enhancedImagePath = await enhancementOutputStorage
           .commitEnhancementOutput(preparedTarget);
+      await ScanQualityDiagnostics.recordEnhancement(
+        page: page,
+        sourcePath: sourceImagePath,
+        outputPath: enhancedImagePath,
+        result: result,
+      );
       stopwatch.stop();
       DebugDiagnostics.instance.log(
         'IMAGE_PROCESSING',

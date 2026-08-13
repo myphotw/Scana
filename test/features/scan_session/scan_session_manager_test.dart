@@ -590,7 +590,7 @@ void main() {
         manager.currentSession!.pages.single.correctedImagePath;
     expect(succeeded, isTrue);
     expect(correctedPath, isNotNull);
-    expect(path.basename(correctedPath!), 'corrected_001.jpg');
+    expect(path.basename(correctedPath!), 'corrected_001.png');
     expect(await File(correctedPath).exists(), isTrue);
     expect(
       manager.currentSession!.pages.single.correctionStatus,
@@ -607,7 +607,7 @@ void main() {
     );
     final metadata = jsonDecode(await metadataFile.readAsString()) as Map;
     final pageMetadata = (metadata['pages'] as List).single as Map;
-    expect(pageMetadata['correctedImageFile'], 'corrected_001.jpg');
+    expect(pageMetadata['correctedImageFile'], 'corrected_001.png');
     expect(
       path.isAbsolute(pageMetadata['correctedImageFile'] as String),
       isFalse,
@@ -674,6 +674,7 @@ void main() {
         ),
         documentDetector: const _SuccessfulDocumentDetector(),
         pageCorrector: corrector,
+        pageEnhancer: const _SuccessfulPageEnhancer(),
         sessionIdGenerator: () => 'protected-perspective-session',
       );
       final capture = await _createCapture(testRoot, 'book-page.jpg');
@@ -689,9 +690,15 @@ void main() {
       ]);
       expect(page.correctionStatus, CorrectionStatus.failed);
       expect(page.correctionType, CorrectionType.curved);
-      expect(path.basename(page.correctedImagePath!), 'corrected_001.jpg');
+      expect(page.correctionFailureReason, 'curve_insufficient_evidence');
+      expect(path.basename(page.correctedImagePath!), 'corrected_001.png');
       expect(await File(page.correctedImagePath!).exists(), isTrue);
       expect(await File(page.rawImagePath).exists(), isTrue);
+      expect(
+        _SuccessfulPageEnhancer.lastSource,
+        page.correctedImagePath,
+        reason: 'fallback enhancement must use the protected perspective',
+      );
 
       manager.close();
       manager = ScanSessionManager(
@@ -705,8 +712,51 @@ void main() {
         page.correctedImagePath,
       );
       expect(recovered.pages.single.correctionStatus, CorrectionStatus.failed);
+      expect(
+        recovered.pages.single.correctionFailureReason,
+        'curve_insufficient_evidence',
+      );
     },
   );
+
+  test('curved success enhances and recovers the curved revision', () async {
+    manager.close();
+    _SuccessfulPageEnhancer.lastSource = null;
+    manager = ScanSessionManager(
+      storage: AppPrivateSessionStorage(
+        appPrivateDirectoryProvider: () async => testRoot,
+      ),
+      documentDetector: const _SuccessfulDocumentDetector(),
+      pageCorrector: const _SuccessfulPageCorrector(),
+      pageEnhancer: const _SuccessfulPageEnhancer(),
+      sessionIdGenerator: () => 'curved-enhanced-session',
+    );
+    await manager.addRawCapture(
+      (await _createCapture(testRoot, 'curved-enhanced.jpg')).path,
+    );
+
+    expect(await manager.correctPageAt(0, CorrectionType.curved), isTrue);
+    final page = manager.currentSession!.pages.single;
+    expect(page.correctionType, CorrectionType.curved);
+    expect(
+      path.basename(page.correctedImagePath!),
+      startsWith('corrected_curved_'),
+    );
+    expect(_SuccessfulPageEnhancer.lastSource, page.correctedImagePath);
+    expect(page.displayImagePath, page.enhancedImagePath);
+
+    manager.close();
+    manager = ScanSessionManager(
+      storage: AppPrivateSessionStorage(
+        appPrivateDirectoryProvider: () async => testRoot,
+      ),
+    );
+    final recovered =
+        (await manager.findRecoverableSessions()).single.pages.single;
+    expect(recovered.correctionType, CorrectionType.curved);
+    expect(recovered.correctedImagePath, page.correctedImagePath);
+    expect(recovered.displayImagePath, page.enhancedImagePath);
+  });
 
   test(
     'page deletion removes raw, correction variants, and pending output',
@@ -735,11 +785,11 @@ void main() {
           manager.currentSession!.pages.single.enhancedImagePath!;
       final pendingPath = path.join(
         path.dirname(rawPath),
-        '.corrected_001.jpg.pending.jpg',
+        '.corrected_001.png.pending.png',
       );
       final enhancementPendingPath = path.join(
         path.dirname(rawPath),
-        '.enhanced_bw_001.jpg.pending.jpg',
+        '.enhanced_bw_001.png.pending.png',
       );
       await File(pendingPath).writeAsBytes([9]);
       await File(enhancementPendingPath).writeAsBytes([9]);
@@ -884,42 +934,35 @@ void main() {
     expect(page.documentCorners!.topLeft.y, 300);
   });
 
-  test(
-    'passes page boundary into curved correction with baseline fallback available',
-    () async {
-      manager.close();
-      final corrector = _RecordingBoundaryCorrector();
-      manager = ScanSessionManager(
-        storage: AppPrivateSessionStorage(
-          appPrivateDirectoryProvider: () async => testRoot,
-        ),
-        documentDetector: const _LowConfidenceDocumentDetector(),
-        pageCorrector: corrector,
-        sessionIdGenerator: () => 'boundary-curve-session',
-      );
-      final capture = await _createCapture(testRoot, 'boundary-curve.jpg');
-      await manager.addRawCapture(
-        capture.path,
-        stablePreviewBoundary: _previewBoundary(),
-      );
+  test('curved correction uses the rectified coordinate space', () async {
+    manager.close();
+    final corrector = _RecordingBoundaryCorrector();
+    manager = ScanSessionManager(
+      storage: AppPrivateSessionStorage(
+        appPrivateDirectoryProvider: () async => testRoot,
+      ),
+      documentDetector: const _LowConfidenceDocumentDetector(),
+      pageCorrector: corrector,
+      sessionIdGenerator: () => 'boundary-curve-session',
+    );
+    final capture = await _createCapture(testRoot, 'boundary-curve.jpg');
+    await manager.addRawCapture(
+      capture.path,
+      stablePreviewBoundary: _previewBoundary(),
+    );
 
-      expect(await manager.correctPageAt(0, CorrectionType.curved), isTrue);
-      expect(corrector.boundaries, hasLength(2));
-      expect(
-        corrector.boundaries.every((boundary) => boundary != null),
-        isTrue,
-      );
-      expect(
-        corrector.boundaries.every(
-          (boundary) =>
-              boundary!.top.length >= 3 &&
-              boundary.bottom.length >= 3 &&
-              boundary.spineSide == PageBoundarySide.left,
-        ),
-        isTrue,
-      );
-    },
-  );
+    expect(await manager.correctPageAt(0, CorrectionType.curved), isTrue);
+    expect(corrector.boundaries, hasLength(2));
+    expect(corrector.boundaries.first, isNotNull);
+    expect(corrector.boundaries.last, isNull);
+    expect(path.basename(corrector.sourcePaths.last), 'corrected_001.png');
+    expect(corrector.sourcePaths.last, isNot(capture.path));
+    expect(corrector.boundaryModes.last, PageBoundaryMode.insetFallback);
+    expect(corrector.corners.last.topLeft.x, 0);
+    expect(corrector.corners.last.topLeft.y, 0);
+    expect(corrector.corners.last.bottomRight.x, 899);
+    expect(corrector.corners.last.bottomRight.y, 1399);
+  });
 
   test(
     'one spread capture creates left then right independent scan pages',
@@ -1088,7 +1131,7 @@ void main() {
     expect(page.correctionStatus, CorrectionStatus.completed);
     expect(page.enhancementMode, EnhancementMode.scanColor);
     expect(page.enhancementStatus, EnhancementStatus.completed);
-    expect(path.basename(page.enhancedImagePath!), 'enhanced_001.jpg');
+    expect(path.basename(page.enhancedImagePath!), 'enhanced_001.png');
     expect(page.displayImagePath, page.enhancedImagePath);
     expect(await File(page.rawImagePath).exists(), isTrue);
     expect(await File(page.correctedImagePath!).exists(), isTrue);
@@ -1107,7 +1150,7 @@ void main() {
             )
             as Map<String, dynamic>;
     final pageMetadata = (metadata['pages'] as List).single as Map;
-    expect(pageMetadata['enhancedImageFile'], 'enhanced_001.jpg');
+    expect(pageMetadata['enhancedImageFile'], 'enhanced_001.png');
     expect(path.isAbsolute(pageMetadata['enhancedImageFile'] as String), false);
     expect(pageMetadata['enhancementMode'], 'scanColor');
     expect(pageMetadata['enhancementStatus'], 'completed');
@@ -1196,7 +1239,7 @@ void main() {
   });
 
   test(
-    'Single capture stores AI comparison without replacing OpenCV crop',
+    'Single capture promotes visibility-safe AI final to production crop',
     () async {
       manager.close();
       final ai = _RecordingAiSegmenter();
@@ -1219,8 +1262,8 @@ void main() {
       expect(page.aiSegmentationResult?.success, isTrue);
       expect(page.aiSegmentationResult?.hasUsableRefinedBoundary, isTrue);
       expect(page.aiSegmentationResult?.refinedCorners?.topLeft.x, 20);
-      expect(page.cropSource, CropSource.highResPaperBoundary);
-      expect(page.documentCorners?.topLeft.x, 50);
+      expect(page.cropSource, CropSource.aiRefined);
+      expect(page.documentCorners?.topLeft.x, 20);
     },
   );
 
@@ -1274,7 +1317,7 @@ void main() {
       expect(page.aiSegmentationResult?.success, isFalse);
       expect(page.correctionStatus, CorrectionStatus.completed);
       expect(page.enhancementStatus, EnhancementStatus.completed);
-      expect(page.cropSource, CropSource.highResPaperBoundary);
+      expect(page.cropSource, CropSource.openCvFallback);
       expect(await File(page.displayImagePath).exists(), isTrue);
     },
   );
@@ -1362,6 +1405,193 @@ void main() {
     expect(restored.cropSource, initial.cropSource);
     expect(restored.hasUserAdjustedCorners, isFalse);
   });
+
+  test(
+    'capture automatically applies mild curvature and persists pipeline state',
+    () async {
+      manager.close();
+      final corrector = _AutomaticCurvaturePageCorrector(
+        CurvatureState.mildCurve,
+      );
+      manager = ScanSessionManager(
+        storage: AppPrivateSessionStorage(
+          appPrivateDirectoryProvider: () async => testRoot,
+        ),
+        documentDetector: const _SuccessfulDocumentDetector(),
+        pageCorrector: corrector,
+        pageEnhancer: const _SuccessfulPageEnhancer(),
+        sessionIdGenerator: () => 'automatic-mild',
+      );
+
+      final page = await manager.captureAndProcess(
+        (await _createCapture(testRoot, 'automatic-mild.jpg')).path,
+      );
+
+      expect(corrector.calls, [
+        CorrectionType.perspective,
+        CorrectionType.curved,
+      ]);
+      expect(page.perspectiveApplied, isTrue);
+      expect(page.curvatureState, CurvatureState.mildCurve);
+      expect(page.curvedApplied, isTrue);
+      expect(page.curvedConfidence, 0.64);
+      expect(page.curvatureMagnitude, 0.004);
+      expect(page.enhancementApplied, isTrue);
+      expect(page.correctionType, CorrectionType.curved);
+      expect(
+        path.basename(page.correctedImagePath!),
+        startsWith('corrected_curved_'),
+      );
+
+      final recovered =
+          (await manager.findRecoverableSessions()).single.pages.single;
+      expect(recovered.curvatureState, CurvatureState.mildCurve);
+      expect(recovered.curvedApplied, isTrue);
+      expect(recovered.enhancementApplied, isTrue);
+    },
+  );
+
+  test(
+    'automatic curvature reuses AI paper contour as geometry evidence',
+    () async {
+      manager.close();
+      final corrector = _RecordingBoundaryCorrector();
+      manager = ScanSessionManager(
+        storage: AppPrivateSessionStorage(
+          appPrivateDirectoryProvider: () async => testRoot,
+        ),
+        documentDetector: const _SuccessfulDocumentDetector(),
+        aiDocumentSegmenter: _RecordingAiSegmenter(),
+        pageCorrector: corrector,
+        pageEnhancer: const _SuccessfulPageEnhancer(),
+        sessionIdGenerator: () => 'automatic-contour',
+      );
+
+      await manager.captureAndProcess(
+        (await _createCapture(testRoot, 'automatic-contour.jpg')).path,
+      );
+
+      expect(corrector.boundaries.length, 2);
+      expect(corrector.boundaryModes.last, PageBoundaryMode.detected);
+      expect(corrector.boundaries.last, isNotNull);
+      expect(corrector.boundaries.last!.top.length, greaterThan(3));
+      expect(corrector.boundaries.last!.bottom.length, greaterThan(3));
+      expect(corrector.corners.last.topLeft.x, 20);
+      final recovered =
+          (await manager.findRecoverableSessions()).single.pages.single;
+      expect(recovered.aiSegmentationResult!.paperContour, isNotEmpty);
+    },
+  );
+
+  test(
+    'flat and unreliable curvature keep Perspective as normal success',
+    () async {
+      for (final state in [CurvatureState.flat, CurvatureState.unreliable]) {
+        manager.close();
+        manager = ScanSessionManager(
+          storage: AppPrivateSessionStorage(
+            appPrivateDirectoryProvider: () async => testRoot,
+          ),
+          documentDetector: const _SuccessfulDocumentDetector(),
+          pageCorrector: _AutomaticCurvaturePageCorrector(state),
+          pageEnhancer: const _SuccessfulPageEnhancer(),
+          sessionIdGenerator: () => 'automatic-${state.name}',
+        );
+
+        final page = await manager.captureAndProcess(
+          (await _createCapture(testRoot, '${state.name}.jpg')).path,
+        );
+
+        expect(page.correctionStatus, CorrectionStatus.completed);
+        expect(page.correctionType, CorrectionType.perspective);
+        expect(page.perspectiveApplied, isTrue);
+        expect(page.curvatureState, state);
+        expect(page.curvedApplied, isFalse);
+        expect(page.enhancementStatus, EnhancementStatus.completed);
+        expect(page.enhancementApplied, isTrue);
+        expect(
+          path.basename(page.correctedImagePath!),
+          startsWith('corrected_'),
+        );
+      }
+    },
+  );
+
+  test(
+    'Quick Corner reruns automatic curvature without replacing manual corners',
+    () async {
+      manager.close();
+      final corrector = _AutomaticCurvaturePageCorrector(
+        CurvatureState.strongCurve,
+      );
+      manager = ScanSessionManager(
+        storage: AppPrivateSessionStorage(
+          appPrivateDirectoryProvider: () async => testRoot,
+        ),
+        documentDetector: const _SuccessfulDocumentDetector(),
+        pageCorrector: corrector,
+        pageEnhancer: const _SuccessfulPageEnhancer(),
+        sessionIdGenerator: () => 'manual-auto-curve',
+      );
+      await manager.captureAndProcess(
+        (await _createCapture(testRoot, 'manual-auto-curve.jpg')).path,
+      );
+      const manual = DocumentCorners(
+        topLeft: DocumentPoint(80, 90),
+        topRight: DocumentPoint(920, 90),
+        bottomRight: DocumentPoint(930, 1410),
+        bottomLeft: DocumentPoint(70, 1410),
+      );
+
+      expect(await manager.applyManualCornersAt(0, manual), isTrue);
+      final page = manager.currentSession!.pages.single;
+      expect(page.documentCorners?.topLeft.x, manual.topLeft.x);
+      expect(page.documentCorners?.bottomRight.y, manual.bottomRight.y);
+      expect(page.cropSource, CropSource.manualCorners);
+      expect(page.curvatureState, CurvatureState.strongCurve);
+      expect(page.curvedApplied, isTrue);
+      expect(page.enhancementApplied, isTrue);
+      expect(
+        corrector.calls.where((type) => type == CorrectionType.curved).length,
+        2,
+      );
+    },
+  );
+
+  test(
+    'Spread runs the full automatic pipeline independently left to right',
+    () async {
+      manager.close();
+      final corrector = _AutomaticCurvaturePageCorrector(
+        CurvatureState.strongCurve,
+      );
+      manager = ScanSessionManager(
+        storage: AppPrivateSessionStorage(
+          appPrivateDirectoryProvider: () async => testRoot,
+        ),
+        documentDetector: const _SuccessfulDocumentDetector(),
+        pageCorrector: corrector,
+        pageEnhancer: const _SuccessfulPageEnhancer(),
+        spreadCaptureSplitter: const _TestSpreadCaptureSplitter(),
+        spreadFallbackCropper: const _TestSpreadFallbackCropper(),
+        sessionIdGenerator: () => 'spread-auto-curve',
+      );
+
+      final pages = await manager.captureAndProcessSpread(
+        (await _createCapture(testRoot, 'spread-auto-curve.jpg')).path,
+      );
+
+      expect(pages.map((page) => page.pageNo), [1, 2]);
+      expect(corrector.calls, [
+        CorrectionType.perspective,
+        CorrectionType.curved,
+        CorrectionType.perspective,
+        CorrectionType.curved,
+      ]);
+      expect(pages.every((page) => page.curvedApplied), isTrue);
+      expect(pages.every((page) => page.enhancementApplied), isTrue);
+    },
+  );
 }
 
 ScanSessionManager _spreadManager(
@@ -1449,6 +1679,7 @@ class _RecordingAiSegmenter implements AiDocumentSegmenter {
     String imagePath, {
     DocumentPageSide? pageSide,
     DocumentCorners? openCvCorners,
+    DocumentCorners? expectedGuideCorners,
     String? debugOutputDirectory,
     required String debugStem,
   }) async {
@@ -1479,6 +1710,35 @@ class _RecordingAiSegmenter implements AiDocumentSegmenter {
               bottomRight: DocumentPoint(980, 1480),
               bottomLeft: DocumentPoint(20, 1480),
             ),
+      paperContour: fail
+          ? const []
+          : const [
+              DocumentPoint(20, 20),
+              DocumentPoint(260, 24),
+              DocumentPoint(500, 28),
+              DocumentPoint(740, 24),
+              DocumentPoint(980, 20),
+              DocumentPoint(982, 380),
+              DocumentPoint(984, 760),
+              DocumentPoint(982, 1120),
+              DocumentPoint(980, 1480),
+              DocumentPoint(740, 1476),
+              DocumentPoint(500, 1470),
+              DocumentPoint(260, 1476),
+              DocumentPoint(20, 1480),
+              DocumentPoint(18, 1120),
+              DocumentPoint(16, 760),
+              DocumentPoint(18, 380),
+            ],
+      finalCorners: fail
+          ? null
+          : const DocumentCorners(
+              topLeft: DocumentPoint(20, 20),
+              topRight: DocumentPoint(980, 20),
+              bottomRight: DocumentPoint(980, 1480),
+              bottomLeft: DocumentPoint(20, 1480),
+            ),
+      finalSource: fail ? null : AiFinalBoundarySource.refined,
       totalRefineMs: fail ? 0 : 5,
       rawAreaRatio: fail ? 0 : 0.84,
       refinedAreaRatio: fail ? 0 : 0.93,
@@ -1668,6 +1928,71 @@ class _SuccessfulPageCorrector implements PageCorrector {
   }
 }
 
+class _AutomaticCurvaturePageCorrector implements PageCorrector {
+  _AutomaticCurvaturePageCorrector(this.state);
+
+  final CurvatureState state;
+  final List<CorrectionType> calls = [];
+
+  @override
+  Future<PageCorrectionResult> correct({
+    required String sourceImagePath,
+    required String outputImagePath,
+    required DocumentCorners corners,
+    required CorrectionType type,
+    required PageBoundaryMode boundaryMode,
+    PageBoundary? pageBoundary,
+  }) async {
+    calls.add(type);
+    if (type == CorrectionType.perspective) {
+      await File(outputImagePath).writeAsBytes([4, 5, 6]);
+      return const PageCorrectionResult(outputWidth: 900, outputHeight: 1400);
+    }
+    if (state == CurvatureState.flat || state == CurvatureState.unreliable) {
+      throw PageCorrectionFailure(
+        state == CurvatureState.flat
+            ? CorrectionOutcome.nearlyFlat
+            : CorrectionOutcome.lowConfidence,
+        null,
+        state == CurvatureState.flat
+            ? 'curve_nearly_flat'
+            : 'curve_low_confidence',
+        <String, Object>{
+          'curvatureState': state.name,
+          'curvatureMagnitude': state == CurvatureState.flat ? 0.0008 : 0.004,
+          'confidence': state == CurvatureState.flat ? 0.72 : 0.42,
+          'coverage': 0.65,
+          'consistency': state == CurvatureState.flat ? 0.8 : 0.3,
+          'evidenceCount': 3,
+          'rejectReason': state == CurvatureState.flat
+              ? 'curvature_too_small'
+              : 'evidence_unreliable',
+          'detectMs': 12,
+        },
+      );
+    }
+    await File(outputImagePath).writeAsBytes([7, 8, 9]);
+    return PageCorrectionResult(
+      outputWidth: 900,
+      outputHeight: 1400,
+      diagnostics: <String, Object>{
+        'curvatureState': state.name,
+        'curvatureMagnitude': state == CurvatureState.mildCurve ? 0.004 : 0.012,
+        'confidence': state == CurvatureState.mildCurve ? 0.64 : 0.78,
+        'coverage': 0.72,
+        'candidateScore': 0.8,
+        'consistency': 0.84,
+        'evidenceCount': 4,
+        'deformationStrength': state == CurvatureState.mildCurve ? 0.55 : 1.0,
+        'perspectiveStraightness': 0.7,
+        'curvedStraightness': 0.73,
+        'detectMs': 14,
+        'dewarpMs': 18,
+      },
+    );
+  }
+}
+
 class _SuccessfulPageEnhancer implements PageEnhancer {
   const _SuccessfulPageEnhancer();
 
@@ -1734,7 +2059,16 @@ class _CurveStageFailingPageCorrector implements PageCorrector {
   }) async {
     calls.add(type);
     if (type == CorrectionType.curved) {
-      throw StateError('Stable page curvature was not found.');
+      throw const PageCorrectionFailure(
+        CorrectionOutcome.lowConfidence,
+        'Stable page curvature was not found.',
+        'curve_insufficient_evidence',
+        {
+          'evidenceCount': 1,
+          'minimumEvidenceCount': 2,
+          'rejectionReason': 'insufficient_evidence',
+        },
+      );
     }
     await File(outputImagePath).writeAsBytes([7, 8, 9]);
     return const PageCorrectionResult(outputWidth: 900, outputHeight: 1400);
@@ -1743,6 +2077,10 @@ class _CurveStageFailingPageCorrector implements PageCorrector {
 
 class _RecordingBoundaryCorrector implements PageCorrector {
   final List<PageBoundary?> boundaries = [];
+  final List<String> sourcePaths = [];
+  final List<String> outputPaths = [];
+  final List<PageBoundaryMode> boundaryModes = [];
+  final List<DocumentCorners> corners = [];
 
   @override
   Future<PageCorrectionResult> correct({
@@ -1754,6 +2092,10 @@ class _RecordingBoundaryCorrector implements PageCorrector {
     PageBoundary? pageBoundary,
   }) async {
     boundaries.add(pageBoundary);
+    sourcePaths.add(sourceImagePath);
+    outputPaths.add(outputImagePath);
+    boundaryModes.add(boundaryMode);
+    this.corners.add(corners);
     await File(outputImagePath).writeAsBytes([1, 2, 3]);
     return const PageCorrectionResult(outputWidth: 900, outputHeight: 1400);
   }

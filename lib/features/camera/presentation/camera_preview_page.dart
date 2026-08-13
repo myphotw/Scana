@@ -18,6 +18,7 @@ import 'package:scana/models/capture_boundary_snapshot.dart';
 import 'package:scana/services/camera/camera_session.dart';
 import 'package:scana/services/image_processing/document_detector.dart';
 import 'package:scana/services/image_processing/live_document_detection.dart';
+import 'package:scana/services/image_processing/capture_guide_policy.dart';
 import 'package:scana/services/diagnostics/debug_diagnostics.dart';
 import 'package:scana/services/orientation/screen_orientation_controller.dart';
 
@@ -264,7 +265,10 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
           widget.sessionManager.captureMode == ScanCaptureMode.spread;
       final captureGuideRegion = isSpread
           ? null
-          : _ScanGuideGeometry.regionFor(MediaQuery.sizeOf(context));
+          : CaptureGuidePolicy.singleForViewport(
+              width: MediaQuery.sizeOf(context).width,
+              height: MediaQuery.sizeOf(context).height,
+            );
       final controller = cameraSession.controller;
       final deviceOrientationDegrees =
           CameraPreviewBoundaryTransform.deviceOrientationDegrees(
@@ -407,36 +411,35 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          CameraPreview(
-            cameraSession.controller,
-            child: AnimatedBuilder(
-              animation: Listenable.merge([
-                _liveDetection,
-                _leftLiveDetection,
-                _rightLiveDetection,
-              ]),
-              builder: (context, child) => _ScanGuideOverlay(
-                boundary: captureMode == ScanCaptureMode.single
-                    ? _liveDetection.visibleNormalizedBoundary
-                    : null,
-                isStable: _liveDetection.hasStableDocument,
-                displayLevel: _liveDetection.displayLevel,
-                leftBoundary: captureMode == ScanCaptureMode.spread
-                    ? _leftLiveDetection.visibleNormalizedBoundary
-                    : null,
-                leftStable: _leftLiveDetection.hasStableDocument,
-                leftDisplayLevel: _leftLiveDetection.displayLevelFor(
-                  CaptureBoundarySide.left,
-                ),
-                rightBoundary: captureMode == ScanCaptureMode.spread
-                    ? _rightLiveDetection.visibleNormalizedBoundary
-                    : null,
-                rightStable: _rightLiveDetection.hasStableDocument,
-                rightDisplayLevel: _rightLiveDetection.displayLevelFor(
-                  CaptureBoundarySide.right,
-                ),
-                previewRotationDegrees: _previewRotation(),
+          CameraPreview(cameraSession.controller),
+          FixedCaptureGuide(mode: captureMode),
+          AnimatedBuilder(
+            animation: Listenable.merge([
+              _liveDetection,
+              _leftLiveDetection,
+              _rightLiveDetection,
+            ]),
+            builder: (context, child) => _ScanGuideOverlay(
+              boundary: captureMode == ScanCaptureMode.single
+                  ? _liveDetection.visibleNormalizedBoundary
+                  : null,
+              isStable: _liveDetection.hasStableDocument,
+              displayLevel: _liveDetection.displayLevel,
+              leftBoundary: captureMode == ScanCaptureMode.spread
+                  ? _leftLiveDetection.visibleNormalizedBoundary
+                  : null,
+              leftStable: _leftLiveDetection.hasStableDocument,
+              leftDisplayLevel: _leftLiveDetection.displayLevelFor(
+                CaptureBoundarySide.left,
               ),
+              rightBoundary: captureMode == ScanCaptureMode.spread
+                  ? _rightLiveDetection.visibleNormalizedBoundary
+                  : null,
+              rightStable: _rightLiveDetection.hasStableDocument,
+              rightDisplayLevel: _rightLiveDetection.displayLevelFor(
+                CaptureBoundarySide.right,
+              ),
+              previewRotationDegrees: _previewRotation(),
             ),
           ),
           SafeArea(
@@ -454,8 +457,6 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
               ),
             ),
           ),
-          if (widget.sessionManager.captureMode == ScanCaptureMode.spread)
-            const SpreadCaptureGuide(),
           SafeArea(
             child: AnimatedBuilder(
               animation: widget.sessionManager,
@@ -472,21 +473,6 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
               },
             ),
           ),
-          if (kDebugMode)
-            SafeArea(
-              child: Align(
-                alignment: Alignment.topRight,
-                child: Padding(
-                  padding: const EdgeInsets.only(top: 56, right: 16),
-                  child: IconButton.filledTonal(
-                    key: const Key('exportDebugLogButton'),
-                    tooltip: '진단 로그 내보내기',
-                    onPressed: _exportDebugLog,
-                    icon: const Icon(Icons.bug_report_outlined),
-                  ),
-                ),
-              ),
-            ),
           SafeArea(
             child: Align(
               alignment: Alignment.topCenter,
@@ -556,27 +542,6 @@ class _CameraPreviewPageState extends State<CameraPreviewPage> {
         ],
       ),
     );
-  }
-
-  Future<void> _exportDebugLog() async {
-    try {
-      final exported = await DebugDiagnostics.instance.exportLog();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(exported ? '진단 로그를 내보냈습니다.' : '진단 로그 내보내기를 취소했습니다.'),
-        ),
-      );
-    } on PlatformException catch (error) {
-      DebugDiagnostics.instance.log(
-        'DIAGNOSTICS',
-        'export_failed code=${error.code} message=${error.message}',
-      );
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('진단 로그를 내보낼 수 없습니다.')));
-    }
   }
 
   Future<void> _openGallery() async {
@@ -735,6 +700,113 @@ class _CaptureModeSelector extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Persistent WYSIWYG capture target shown independently from AI detection.
+class FixedCaptureGuide extends StatelessWidget {
+  const FixedCaptureGuide({super.key, required this.mode});
+
+  final ScanCaptureMode mode;
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: Stack(
+        key: ValueKey('fixedCaptureGuide-${mode.name}'),
+        fit: StackFit.expand,
+        children: [
+          CustomPaint(painter: _FixedCaptureGuidePainter(mode)),
+          if (mode == ScanCaptureMode.spread)
+            const Center(
+              child: SizedBox(
+                key: Key('fixedSpreadCenterGuide'),
+                width: 2,
+                height: double.infinity,
+              ),
+            ),
+          if (mode == ScanCaptureMode.spread)
+            const Align(
+              alignment: Alignment(0, -0.66),
+              child: DecoratedBox(
+                decoration: BoxDecoration(color: Colors.black54),
+                child: Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  child: Text(
+                    '책 가운데를 기준선에 맞춰주세요',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FixedCaptureGuidePainter extends CustomPainter {
+  const _FixedCaptureGuidePainter(this.mode);
+
+  final ScanCaptureMode mode;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final regions = CaptureGuidePolicy.previewRegions(
+      mode,
+      width: size.width,
+      height: size.height,
+    );
+    for (final region in regions) {
+      final rect = Rect.fromLTRB(
+        region.left * size.width,
+        region.top * size.height,
+        region.right * size.width,
+        region.bottom * size.height,
+      );
+      final outside = Path()
+        ..fillType = PathFillType.evenOdd
+        ..addRect(Offset.zero & size)
+        ..addRect(rect);
+      canvas.drawPath(
+        outside,
+        Paint()..color = Colors.black.withValues(alpha: 0.10),
+      );
+      canvas.drawRect(
+        rect,
+        Paint()
+          ..color = Colors.black.withValues(alpha: 0.72)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 4,
+      );
+      canvas.drawRect(
+        rect,
+        Paint()
+          ..color = Colors.white.withValues(alpha: 0.92)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.5,
+      );
+    }
+    if (mode == ScanCaptureMode.spread) {
+      canvas.drawLine(
+        Offset(size.width * .5, 0),
+        Offset(size.width * .5, size.height),
+        Paint()
+          ..color = Colors.black.withValues(alpha: 0.72)
+          ..strokeWidth = 5,
+      );
+      canvas.drawLine(
+        Offset(size.width * .5, 0),
+        Offset(size.width * .5, size.height),
+        Paint()
+          ..color = const Color(0xff4ade80)
+          ..strokeWidth = 2,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _FixedCaptureGuidePainter oldDelegate) =>
+      oldDelegate.mode != mode;
 }
 
 class SpreadCaptureGuide extends StatelessWidget {
@@ -941,32 +1013,7 @@ class CameraPreviewBoundaryTransform {
 class CameraBoundaryOverlayStyle {
   const CameraBoundaryOverlayStyle._();
 
-  /// The normalized capture guide remains metadata-only fallback.
-  static const bool showsFixedCaptureGuide = false;
-}
-
-class _ScanGuideGeometry {
-  const _ScanGuideGeometry._();
-
-  static Rect rectFor(Size size) {
-    final guideWidth = size.width * 0.78;
-    final guideHeight = math.min(size.height * 0.68, guideWidth * 1.414);
-    return Rect.fromCenter(
-      center: size.center(Offset.zero),
-      width: guideWidth,
-      height: guideHeight,
-    );
-  }
-
-  static CaptureGuideRegion regionFor(Size size) {
-    final rect = rectFor(size);
-    return CaptureGuideRegion(
-      left: rect.left / size.width,
-      top: rect.top / size.height,
-      right: rect.right / size.width,
-      bottom: rect.bottom / size.height,
-    );
-  }
+  static const bool showsFixedCaptureGuide = true;
 }
 
 class RecentScanGalleryButton extends StatelessWidget {

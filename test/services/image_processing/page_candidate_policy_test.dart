@@ -121,8 +121,8 @@ void main() {
     );
   });
 
-  test('does not render the metadata-only fixed capture guide', () {
-    expect(CameraBoundaryOverlayStyle.showsFixedCaptureGuide, isFalse);
+  test('shows fixed capture guides without a Camera debug button', () {
+    expect(CameraBoundaryOverlayStyle.showsFixedCaptureGuide, isTrue);
   });
 
   test(

@@ -26,6 +26,18 @@ import kotlin.math.sqrt
  * prior. It is deliberately isolated from Scana's production crop decision.
  */
 class AiPaperBoundaryRefiner {
+    data class EdgeVisibility(
+        val edge: String,
+        val transitionScore: Double,
+        val supportingSampleRatio: Double,
+        val borderDistance: Double,
+        val occlusionPenalty: Double,
+        val confidence: Double,
+        val status: String,
+        val foregroundBeyond: Boolean = false,
+        val paperContinuesBeyond: Boolean = false,
+    )
+
     data class Result(
         val accepted: Boolean,
         val corners: List<Point>?,
@@ -50,6 +62,9 @@ class AiPaperBoundaryRefiner {
         val failureReason: String?,
         val paperContour: List<Point>?,
         val envelopeCorners: List<Point>?,
+        val finalCorners: List<Point>? = null,
+        val finalSource: String? = null,
+        val edgeVisibilities: List<EdgeVisibility> = emptyList(),
     )
 
     private data class PaperCandidate(
@@ -72,6 +87,7 @@ class AiPaperBoundaryRefiner {
         val occlusionPenalty: Double,
         val reliable: Boolean,
         val conservative: Boolean = false,
+        val support: Double = 0.0,
     )
 
     private data class EdgeEvidence(
@@ -249,6 +265,28 @@ class AiPaperBoundaryRefiner {
                 refinedConfidence = confidence,
                 conservativeExpansion = adjustments.any { it.conservative },
             )
+            val edgeVisibilities = classifyEdgeVisibility(
+                rawCorners = scaledRaw,
+                candidateCorners = candidateCorners,
+                adjustments = adjustments,
+                width = analysis.cols(),
+                height = analysis.rows(),
+                lab = lab,
+                gradient = gradient,
+                aiMask = mask,
+                searchRoi = searchRoi,
+            )
+            val finalBoundary = visibilitySafeBoundary(
+                rawCorners = scaledRaw,
+                refinedCorners = candidateCorners,
+                refinedAccepted = sanity.accepted,
+                adjustments = adjustments,
+                visibilities = edgeVisibilities,
+                aiMask = mask,
+                paperCandidate = paperCandidate,
+                pageSide = pageSide,
+                searchRoi = searchRoi,
+            )
             return Result(
                 accepted = sanity.accepted,
                 corners = outputCorners,
@@ -277,6 +315,11 @@ class AiPaperBoundaryRefiner {
                 envelopeCorners = paperCandidate?.corners?.map {
                     Point(it.x / analysisScale, it.y / analysisScale)
                 },
+                finalCorners = finalBoundary.first?.map {
+                    Point(it.x / analysisScale, it.y / analysisScale)
+                },
+                finalSource = finalBoundary.second,
+                edgeVisibilities = edgeVisibilities,
             )
         } catch (error: Throwable) {
             return failure(Rect(), totalStart, error.message ?: "refinement_exception")
@@ -286,6 +329,289 @@ class AiPaperBoundaryRefiner {
             lab.release()
             gray.release()
             gradient.release()
+        }
+    }
+
+    /**
+     * Edge visibility is intentionally independent per side. A missing paper /
+     * background transition means "unknown", never permission to crop inward.
+     */
+    private fun classifyEdgeVisibility(
+        rawCorners: List<Point>,
+        candidateCorners: List<Point>?,
+        adjustments: List<EdgeAdjustment>,
+        width: Int,
+        height: Int,
+        lab: Mat,
+        gradient: Mat,
+        aiMask: Mat,
+        searchRoi: Rect,
+    ): List<EdgeVisibility> {
+        val names = listOf("top", "right", "bottom", "left")
+        val corners = candidateCorners ?: rawCorners
+        return names.indices.map { index ->
+            val adjustment = adjustments[index]
+            val start = corners[index]
+            val end = corners[(index + 1) % 4]
+            val midpoint = Point((start.x + end.x) / 2.0, (start.y + end.y) / 2.0)
+            val borderDistance = when (index) {
+                0 -> midpoint.y / height.coerceAtLeast(1)
+                1 -> (width - midpoint.x) / width.coerceAtLeast(1)
+                2 -> (height - midpoint.y) / height.coerceAtLeast(1)
+                else -> midpoint.x / width.coerceAtLeast(1)
+            }.coerceIn(0.0, 1.0)
+            val confidence = (
+                adjustment.evidence * 0.46 +
+                    adjustment.support * 0.28 +
+                    adjustment.continuity * 0.18 +
+                    (1.0 - adjustment.occlusionPenalty) * 0.08
+                ).coerceIn(0.0, 1.0)
+            val beyond = if (index == 2) {
+                analyzeBelowBottom(
+                    corners = corners,
+                    lab = lab,
+                    gradient = gradient,
+                    aiMask = aiMask,
+                    searchRoi = searchRoi,
+                )
+            } else {
+                BottomBeyondEvidence(false, false)
+            }
+            val status = when {
+                adjustment.occlusionPenalty >= EDGE_OCCLUDED_THRESHOLD -> "occluded"
+                index == 2 &&
+                    (beyond.foreground || beyond.paperContinues) &&
+                    adjustment.evidence < EDGE_CONFIRMED_TRANSITION -> "unknown"
+                borderDistance <= EDGE_BORDER_THRESHOLD &&
+                    adjustment.evidence < EDGE_CONFIRMED_TRANSITION -> "out_of_frame"
+                adjustment.reliable &&
+                    adjustment.evidence >= EDGE_CONFIRMED_TRANSITION &&
+                    adjustment.support >= EDGE_CONFIRMED_SUPPORT -> "confirmed"
+                adjustment.evidence >= EDGE_WEAK_TRANSITION ||
+                    adjustment.support >= EDGE_WEAK_SUPPORT -> "weak"
+                else -> "unknown"
+            }
+            EdgeVisibility(
+                edge = names[index],
+                transitionScore = adjustment.evidence,
+                supportingSampleRatio = adjustment.support,
+                borderDistance = borderDistance,
+                occlusionPenalty = adjustment.occlusionPenalty,
+                confidence = confidence,
+                status = status,
+                foregroundBeyond = beyond.foreground,
+                paperContinuesBeyond = beyond.paperContinues,
+            )
+        }
+    }
+
+    private data class BottomBeyondEvidence(
+        val foreground: Boolean,
+        val paperContinues: Boolean,
+    )
+
+    /**
+     * Looks only inside the AI ownership/search ROI. Text edges or a bright,
+     * low-chroma paper field below a proposed bottom edge prove that the line
+     * is not a safe physical page boundary.
+     */
+    private fun analyzeBelowBottom(
+        corners: List<Point>,
+        lab: Mat,
+        gradient: Mat,
+        aiMask: Mat,
+        searchRoi: Rect,
+    ): BottomBeyondEvidence {
+        if (corners.size != 4) return BottomBeyondEvidence(false, false)
+        if (searchRoi.width < 2 || searchRoi.height < 2) {
+            return BottomBeyondEvidence(false, false)
+        }
+        val roiRight = searchRoi.x + searchRoi.width
+        val left = max(corners[3].x, corners[0].x).roundToInt()
+            .coerceIn(searchRoi.x, roiRight - 2)
+        val right = min(corners[2].x, corners[1].x).roundToInt()
+            .coerceIn(left + 1, roiRight)
+        val bottomY = max(corners[2].y, corners[3].y).roundToInt()
+        val startY = max(bottomY + 1, searchRoi.y)
+        val endY = min(
+            searchRoi.y + searchRoi.height,
+            bottomY + max(6, (lab.rows() * BOTTOM_ANALYSIS_DEPTH).roundToInt()),
+        )
+        if (endY <= startY || right <= left) {
+            return BottomBeyondEvidence(false, false)
+        }
+        var samples = 0
+        var edgeSamples = 0
+        var darkSamples = 0
+        var paperSamples = 0
+        var maskSamples = 0
+        val stride = max(1, min(lab.cols(), lab.rows()) / 320)
+        var y = startY
+        while (y < endY) {
+            var x = left
+            while (x < right) {
+                val labPixel = lab.get(y, x)
+                if (labPixel != null) {
+                    samples++
+                    if ((gradient.get(y, x)?.firstOrNull() ?: 0.0) >= BOTTOM_EDGE_THRESHOLD) {
+                        edgeSamples++
+                    }
+                    if (labPixel[0] <= BOTTOM_DARK_LUMINANCE) darkSamples++
+                    if (labPixel[0] >= BOTTOM_PAPER_LUMINANCE &&
+                        abs(labPixel[1] - 128.0) <= BOTTOM_PAPER_CHROMA &&
+                        abs(labPixel[2] - 128.0) <= BOTTOM_PAPER_CHROMA
+                    ) paperSamples++
+                    if ((aiMask.get(y, x)?.firstOrNull() ?: 0.0) > 0.0) maskSamples++
+                }
+                x += stride
+            }
+            y += stride
+        }
+        if (samples == 0) return BottomBeyondEvidence(false, false)
+        val foregroundRatio = max(
+            max(
+                edgeSamples.toDouble() / samples,
+                darkSamples.toDouble() / samples,
+            ),
+            maskSamples.toDouble() / samples,
+        )
+        val paperRatio = paperSamples.toDouble() / samples
+        return BottomBeyondEvidence(
+            foreground = foregroundRatio >= BOTTOM_FOREGROUND_RATIO,
+            paperContinues = paperRatio >= BOTTOM_PAPER_RATIO,
+        )
+    }
+
+    /** Builds one production-safe polygon by combining the best evidence per edge. */
+    private fun visibilitySafeBoundary(
+        rawCorners: List<Point>,
+        refinedCorners: List<Point>?,
+        refinedAccepted: Boolean,
+        adjustments: List<EdgeAdjustment>,
+        visibilities: List<EdgeVisibility>,
+        aiMask: Mat,
+        paperCandidate: PaperCandidate?,
+        pageSide: String?,
+        searchRoi: Rect,
+    ): Pair<List<Point>?, String?> {
+        if ((paperCandidate?.ownership ?: 1.0) < MIN_MAIN_PAGE_OWNERSHIP ||
+            (paperCandidate?.adjacentPagePenalty ?: 0.0) >= ADJACENT_REJECTION_THRESHOLD
+        ) return Pair(null, null)
+
+        if (refinedAccepted && refinedCorners != null &&
+            visibilities.all { it.status == "confirmed" }
+        ) return Pair(refinedCorners, "ai_refined")
+
+        val minDimension = min(aiMask.cols(), aiMask.rows()).toDouble()
+        val safeAdjustments = adjustments.mapIndexed { index, adjustment ->
+            val visibility = visibilities[index]
+            val spineEdge = (pageSide == "left" && index == 1) ||
+                (pageSide == "right" && index == 3)
+            val sourceMaximum = minDimension * if (spineEdge) SPINE_OUTWARD_LIMIT else OUTWARD_LIMIT
+            val start = rawCorners[index]
+            val end = rawCorners[(index + 1) % 4]
+            val midpoint = Point((start.x + end.x) / 2.0, (start.y + end.y) / 2.0)
+            val roiOutward = when (index) {
+                0 -> midpoint.y - searchRoi.y
+                1 -> searchRoi.x + searchRoi.width - midpoint.x
+                2 -> searchRoi.y + searchRoi.height - midpoint.y
+                else -> midpoint.x - searchRoi.x
+            }.coerceAtLeast(0.0)
+            val frameOutward = when (index) {
+                0 -> midpoint.y
+                1 -> aiMask.cols() - midpoint.x
+                2 -> aiMask.rows() - midpoint.y
+                else -> midpoint.x
+            }.coerceAtLeast(0.0)
+            val maximum = when {
+                spineEdge -> sourceMaximum
+                visibility.status == "out_of_frame" -> max(sourceMaximum, frameOutward)
+                index == 2 &&
+                    (visibility.foregroundBeyond || visibility.paperContinuesBeyond) ->
+                    max(sourceMaximum, roiOutward)
+                else -> sourceMaximum
+            }
+            val minimumSafe = minDimension * when (visibility.status) {
+                "confirmed" -> 0.0
+                "weak" -> if (index == 2) BOTTOM_WEAK_SAFE_MARGIN else WEAK_SAFE_MARGIN
+                "occluded" -> if (index == 2) BOTTOM_UNKNOWN_SAFE_MARGIN else OCCLUDED_SAFE_MARGIN
+                "out_of_frame" -> if (index == 2) BOTTOM_UNKNOWN_SAFE_MARGIN else UNKNOWN_SAFE_MARGIN
+                else -> if (index == 2) BOTTOM_UNKNOWN_SAFE_MARGIN else UNKNOWN_SAFE_MARGIN
+            }
+            adjustment.copy(offset = max(adjustment.offset, minimumSafe).coerceAtMost(maximum))
+        }
+        val hasRefinementEvidence = paperCandidate != null || visibilities.any {
+            it.status == "confirmed" || it.status == "weak" || it.status == "occluded"
+        }
+        if (hasRefinementEvidence) {
+            val hybrid = clampToSource(
+                intersectShiftedEdges(rawCorners, safeAdjustments),
+                aiMask.cols(),
+                aiMask.rows(),
+            )
+            if (isVisibilitySafeGeometry(rawCorners, hybrid, aiMask)) {
+                return Pair(hybrid, "ai_hybrid")
+            }
+        }
+
+        // A sane raw AI polygon remains useful, but receives proportional
+        // outward padding (largest at the bottom) before production cropping.
+        val rawFallbackOffsets = listOf(
+            WEAK_SAFE_MARGIN,
+            WEAK_SAFE_MARGIN,
+            BOTTOM_UNKNOWN_SAFE_MARGIN,
+            WEAK_SAFE_MARGIN,
+        ).mapIndexed { index, ratio ->
+            val spineEdge = (pageSide == "left" && index == 1) ||
+                (pageSide == "right" && index == 3)
+            EdgeAdjustment(
+                offset = minDimension * if (spineEdge) min(ratio, SPINE_OUTWARD_LIMIT) else ratio,
+                evidence = 0.0,
+                continuity = 0.0,
+                occlusionPenalty = 0.0,
+                reliable = false,
+            )
+        }
+        val rawFallback = clampToSource(
+            intersectShiftedEdges(rawCorners, rawFallbackOffsets),
+            aiMask.cols(),
+            aiMask.rows(),
+        )
+        return if (isVisibilitySafeGeometry(rawCorners, rawFallback, aiMask)) {
+            Pair(rawFallback, "ai_raw_fallback")
+        } else {
+            Pair(null, null)
+        }
+    }
+
+    private fun clampToSource(
+        corners: List<Point>?,
+        width: Int,
+        height: Int,
+    ): List<Point>? = corners?.map { point ->
+        Point(
+            point.x.coerceIn(0.0, width.toDouble()),
+            point.y.coerceIn(0.0, height.toDouble()),
+        )
+    }
+
+    private fun isVisibilitySafeGeometry(
+        rawCorners: List<Point>,
+        candidate: List<Point>?,
+        aiMask: Mat,
+    ): Boolean {
+        if (candidate == null || candidate.size != 4 || candidate.any {
+                !it.x.isFinite() || !it.y.isFinite() ||
+                    it.x !in 0.0..aiMask.cols().toDouble() ||
+                    it.y !in 0.0..aiMask.rows().toDouble()
+            }
+        ) return false
+        val contour = MatOfPoint(*candidate.toTypedArray())
+        return try {
+            val ratio = polygonArea(candidate) / polygonArea(rawCorners).coerceAtLeast(1.0)
+            Imgproc.isContourConvex(contour) && ratio in FINAL_MIN_AREA_RATIO..FINAL_MAX_AREA_RATIO
+        } finally {
+            contour.release()
         }
     }
 
@@ -751,6 +1077,7 @@ class AiPaperBoundaryRefiner {
                         evidence.occlusionPenalty,
                         evidence.score >= MIN_EDGE_EVIDENCE &&
                             evidence.occlusionPenalty <= MAX_ACCEPTED_EDGE_OCCLUSION,
+                        support = evidence.support,
                     )
                 }
                 offset += step
@@ -778,6 +1105,7 @@ class AiPaperBoundaryRefiner {
                         continuity = max(best.continuity, paperEvidence.continuity),
                         occlusionPenalty = min(best.occlusionPenalty, paperEvidence.occlusionPenalty),
                         reliable = paperEvidence.occlusionPenalty <= MAX_ACCEPTED_EDGE_OCCLUSION,
+                        support = max(best.support, paperEvidence.support),
                     )
                 }
             }
@@ -795,9 +1123,17 @@ class AiPaperBoundaryRefiner {
                         paperCandidate?.envelopeConsistency ?: 0.0,
                         best.occlusionPenalty,
                         paperCandidate?.score ?: 0.0 >= MIN_PAPER_SCORE,
+                        support = best.support,
                     )
                 } else {
-                    EdgeAdjustment(0.0, best.evidence, best.continuity, best.occlusionPenalty, false)
+                    EdgeAdjustment(
+                        0.0,
+                        best.evidence,
+                        best.continuity,
+                        best.occlusionPenalty,
+                        false,
+                        support = best.support,
+                    )
                 }
             }
             val adjacentRisk = (paperCandidate?.adjacentPagePenalty ?: 0.0) *
@@ -1289,5 +1625,25 @@ class AiPaperBoundaryRefiner {
         const val CONSERVATIVE_CONFIDENCE_THRESHOLD = 0.58
         const val ENVELOPE_END_TOLERANCE = 0.08
         const val ENVELOPE_PERCENTILE = 0.88
+        const val EDGE_CONFIRMED_TRANSITION = 0.30
+        const val EDGE_CONFIRMED_SUPPORT = 0.46
+        const val EDGE_WEAK_TRANSITION = 0.16
+        const val EDGE_WEAK_SUPPORT = 0.28
+        const val EDGE_OCCLUDED_THRESHOLD = 0.48
+        const val EDGE_BORDER_THRESHOLD = 0.025
+        const val WEAK_SAFE_MARGIN = 0.012
+        const val OCCLUDED_SAFE_MARGIN = 0.030
+        const val UNKNOWN_SAFE_MARGIN = 0.040
+        const val BOTTOM_WEAK_SAFE_MARGIN = 0.035
+        const val BOTTOM_UNKNOWN_SAFE_MARGIN = 0.070
+        const val BOTTOM_ANALYSIS_DEPTH = 0.12
+        const val BOTTOM_EDGE_THRESHOLD = 28.0
+        const val BOTTOM_DARK_LUMINANCE = 112.0
+        const val BOTTOM_PAPER_LUMINANCE = 135.0
+        const val BOTTOM_PAPER_CHROMA = 38.0
+        const val BOTTOM_FOREGROUND_RATIO = 0.018
+        const val BOTTOM_PAPER_RATIO = 0.45
+        const val FINAL_MIN_AREA_RATIO = 0.96
+        const val FINAL_MAX_AREA_RATIO = 1.70
     }
 }

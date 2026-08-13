@@ -23,6 +23,10 @@ Scana는 스마트폰으로 일반 문서와 책을 촬영하고, 데이터 전�
 
 ## 현재 구현 범위
 
+- FairScan AI segmentation과 visibility-safe refinement를 촬영 후 production primary crop으로 사용한다. 최종 우선순위는 AI Refined/Hybrid/Raw safety fallback → OpenCV/Q1.x fallback → 촬영 guide이며, 선택된 네 점과 Perspective 입력은 동일해야 한다.
+- Top/Right/Bottom/Left는 독립 visibility 상태를 가진다. 전이가 없거나 외곽이 화면 밖인 변을 안쪽 문서 경계로 간주하지 않으며, 하단 아래 본문·페이지 번호·종이 영역이 이어지면 비례 안전 여백을 적용한다.
+- Quick Corner Edit는 현재 적용된 final crop을 그대로 보여주고 네 점의 미세 조정만 허용한다. 수동 적용은 원본에서 Perspective, 자동 곡률 분석, 조건부 Curved Dewarp와 화질 보정 전체를 다시 실행하되 OCR을 자동 재실행하지 않는다.
+
 - 카메라 프리뷰, 수동 촬영, 세로형 문서 가이드 Overlay
 - 앱 전용 `scan_sessions/<session_uuid>` 원본 보관과 앱 재시작 후 Session Recovery
 - 최근 페이지 썸네일과 기본 페이지 편집: 선택, 삭제, 순서 변경, 회전 메타데이터
@@ -31,6 +35,8 @@ Scana는 스마트폰으로 일반 문서와 책을 촬영하고, 데이터 전�
 - Page Editor의 검출 외곽선 표시와 네 Corner 수동 조정. 액션은 Preview 밖 SafeArea 툴바에 배치해 네 점의 조작 영역을 가리지 않는다.
 - 네 모서리 거리로 출력 크기를 계산하는 원근 보정과 별도 corrected JPEG 저장
 - 실제 페이지 경계 우선, 4% inset fallback, 다중 수평 구조의 robust 곡률 추정과 안전 검증을 사용하는 보수적 곡면 평탄화
+- 촬영된 모든 페이지는 사용자 버튼 없이 Perspective → 자동 곡률 분석 → 조건부 Curved Dewarp → 선택된 Enhancement pipeline을 완료한다. Spread는 Left/Right를 독립 처리한다.
+- 곡률 상태는 FLAT/MILD_CURVE/STRONG_CURVE/UNRELIABLE로 구분한다. MILD는 제한된 강도, STRONG은 full dewarp를 사용하며 FLAT/UNRELIABLE 또는 품질 검증 실패는 Perspective를 정상 최종 geometry로 사용한다.
 - Page Editor의 원본/보정본 비교, 보정 방식 선택, 재보정과 실패 상태 표시
 - Perspective 결과에 OpenCV 기반 paper-aware Scan Color 화질 보정을 자동 적용한다. 문서를 일반 사진처럼 밝게 만드는 대신 저주파 paper background를 추정하고 밝은 저채도·저텍스처 종이 영역만 whitening한다. 강한 문자·표 edge는 별도로 어둡고 선명하게 보강하며 컬러 도표와 사진은 보호한다.
 - 페이지별 화질 모드는 `스캔(scanColor)`, `원본(originalColor)`, `그레이(grayscale)`, `흑백(blackWhite)`이며 기본값은 스캔이다. 모드 변경은 raw부터 다시 처리하지 않고 corrected 이미지를 입력으로 사용한다.
@@ -38,7 +44,7 @@ Scana는 스마트폰으로 일반 문서와 책을 촬영하고, 데이터 전�
 - 여러 스캔본은 Swipe로 탐색하며, 기본 액션은 재촬영·편집·삭제로 제한한다.
 - 원본·Corner 조작은 상세 편집 화면에만 표시하고, 순서 변경은 별도 페이지 관리 화면에서 수행한다.
 - 촬영은 결과 화면 이동 없이 Camera Preview에서 연속 수행한다. 화면은 촬영 모드, 촬영 버튼, 장수, 최근 스캔본과 처리 중 수만 표시하며 별도 촬영 완료 버튼은 두지 않는다.
-- 촬영 시 사용한 반응형 가이드 영역을 페이지 메타데이터에 저장한다. 편집 Corner 초기값은 사용자 수정 → 자동 검출 → 촬영 가이드 순서로 선택한다.
+- 촬영 시 사용한 반응형 가이드 영역을 페이지 메타데이터에 저장한다. Quick Corner Edit는 실제 적용된 final crop을 초기값으로 사용하며, 이전 세션에 final crop이 없을 때만 촬영 가이드를 Recovery fallback으로 사용한다.
 - 최근 스캔본을 누르면 enhanced 우선 대형 반응형 Grid인 PDF Selection Gallery를 연다. Gallery는 전체/개별 선택, 삭제와 상세 보기만 담당하며 검출·보정·스캔 처리 상태를 표시한다.
 - Gallery 완료는 선택 페이지만 담은 PDF Page Review를 연다. Review의 대형 반응형 Grid에서 Long Press Drag로 최종 출력 순서를 정하고, 짧은 Tap은 선택 페이지만 탐색하는 Viewer를 연다.
 - Review에서 확정한 순서 그대로 PDF에 포함한다. 페이지에 선택된 모드에 맞춰 enhanced를 우선하고 없으면 corrected, raw 순서로 사용하며 rotation 메타데이터를 내보내기 과정에서 적용한다.
@@ -66,6 +72,7 @@ Scana는 스마트폰으로 일반 문서와 책을 촬영하고, 데이터 전�
 - 화질 보정 실패 시 `enhancementStatus=failed`로 기록하고 raw·corrected·ScanPage를 유지한다. Viewer, Gallery와 PDF는 corrected 또는 raw로 안전하게 fallback한다.
 - Scan Color는 hard threshold나 전역 exposure로 종이를 날리지 않는다. 약한 뒷면 비침은 종이 mask의 soft tone mapping으로 완화하고 실제 앞면의 작은 글자·얇은 선은 local dark-detail mask로 유지한다.
 - 곡률의 신뢰도가 낮거나 변형량·remap 좌표가 안전 기준을 벗어나면 곡면 변형을 적용하지 않고 Perspective 결과를 유지한다.
+- Curved 결과는 output canvas/aspect/유효 좌표/변형량과 Perspective 대비 straightness 개선을 확인한 뒤에만 채택한다. 자동 거부는 페이지 실패로 표시하지 않으며 상세 원인은 DEBUG와 Session metadata에만 보존한다.
 - 재촬영은 새 raw와 Perspective 결과가 모두 확정된 경우에만 기존 페이지를 같은 순서로 교체한다.
 - Gallery 완료는 Review로, Review의 PDF 만들기는 파일명·저장 위치·생성 단계로 이동한다. 각 Back은 이전 상태를 보존하며, 처리 대기열이 남아 있으면 Gallery 완료를 비활성화한다.
 - PDF 저장 취소, 입력 이미지 누락, 생성 또는 SAF 기록 실패 시에는 ScanSession과 모든 raw/corrected 파일 및 선택 상태를 유지한다.

@@ -28,9 +28,17 @@ class ScanPage {
     this.correctionStatus = CorrectionStatus.none,
     this.correctionType = CorrectionType.perspective,
     this.correctionOutcome = CorrectionOutcome.none,
+    this.correctionFailureReason,
+    this.perspectiveApplied = false,
+    this.curvatureState = CurvatureState.none,
+    this.curvedApplied = false,
+    this.curvedConfidence,
+    this.curvatureMagnitude,
+    this.curvedRejectReason,
     this.enhancedImagePath,
     this.enhancementMode = EnhancementMode.scanColor,
     this.enhancementStatus = EnhancementStatus.none,
+    this.enhancementApplied = false,
   }) : assert(
          rotation == 0 || rotation == 90 || rotation == 180 || rotation == 270,
        );
@@ -55,9 +63,17 @@ class ScanPage {
   final CorrectionStatus correctionStatus;
   final CorrectionType correctionType;
   final CorrectionOutcome correctionOutcome;
+  final String? correctionFailureReason;
+  final bool perspectiveApplied;
+  final CurvatureState curvatureState;
+  final bool curvedApplied;
+  final double? curvedConfidence;
+  final double? curvatureMagnitude;
+  final String? curvedRejectReason;
   final String? enhancedImagePath;
   final EnhancementMode enhancementMode;
   final EnhancementStatus enhancementStatus;
+  final bool enhancementApplied;
 
   /// Final page appearance shared by Viewer, Gallery, PDF, and thumbnails.
   String get displayImagePath {
@@ -90,9 +106,19 @@ class ScanPage {
     CorrectionStatus? correctionStatus,
     CorrectionType? correctionType,
     CorrectionOutcome? correctionOutcome,
+    String? correctionFailureReason,
+    bool clearCorrectionFailureReason = false,
+    bool? perspectiveApplied,
+    CurvatureState? curvatureState,
+    bool? curvedApplied,
+    double? curvedConfidence,
+    double? curvatureMagnitude,
+    String? curvedRejectReason,
+    bool clearCurvatureDiagnostics = false,
     String? enhancedImagePath,
     EnhancementMode? enhancementMode,
     EnhancementStatus? enhancementStatus,
+    bool? enhancementApplied,
   }) {
     return ScanPage(
       pageNo: pageNo ?? this.pageNo,
@@ -118,9 +144,25 @@ class ScanPage {
       correctionStatus: correctionStatus ?? this.correctionStatus,
       correctionType: correctionType ?? this.correctionType,
       correctionOutcome: correctionOutcome ?? this.correctionOutcome,
+      correctionFailureReason: clearCorrectionFailureReason
+          ? null
+          : correctionFailureReason ?? this.correctionFailureReason,
+      perspectiveApplied: perspectiveApplied ?? this.perspectiveApplied,
+      curvatureState: curvatureState ?? this.curvatureState,
+      curvedApplied: curvedApplied ?? this.curvedApplied,
+      curvedConfidence: clearCurvatureDiagnostics
+          ? null
+          : curvedConfidence ?? this.curvedConfidence,
+      curvatureMagnitude: clearCurvatureDiagnostics
+          ? null
+          : curvatureMagnitude ?? this.curvatureMagnitude,
+      curvedRejectReason: clearCurvatureDiagnostics
+          ? null
+          : curvedRejectReason ?? this.curvedRejectReason,
       enhancedImagePath: enhancedImagePath ?? this.enhancedImagePath,
       enhancementMode: enhancementMode ?? this.enhancementMode,
       enhancementStatus: enhancementStatus ?? this.enhancementStatus,
+      enhancementApplied: enhancementApplied ?? this.enhancementApplied,
     );
   }
 
@@ -167,6 +209,7 @@ class ScanPage {
     required CorrectionType type,
     String? correctedImagePath,
     CorrectionOutcome? outcome,
+    String? failureReason,
   }) {
     return copyWith(
       correctionStatus: status,
@@ -177,10 +220,54 @@ class ScanPage {
           (status == CorrectionStatus.completed
               ? CorrectionOutcome.completed
               : CorrectionOutcome.none),
+      correctionFailureReason: failureReason,
+      clearCorrectionFailureReason: status != CorrectionStatus.failed,
+      perspectiveApplied:
+          type == CorrectionType.perspective &&
+              status == CorrectionStatus.completed
+          ? true
+          : perspectiveApplied,
+      curvatureState: type == CorrectionType.perspective
+          ? CurvatureState.none
+          : curvatureState,
+      curvedApplied: type == CorrectionType.perspective
+          ? false
+          : status == CorrectionStatus.completed,
+      clearCurvatureDiagnostics: type == CorrectionType.perspective,
       spreadFallbackUsed: false,
       enhancementStatus: EnhancementStatus.none,
+      enhancementApplied: false,
     );
   }
+
+  ScanPage withAutomaticCurvature({
+    required CurvatureState state,
+    required bool applied,
+    double? confidence,
+    double? magnitude,
+    String? rejectReason,
+    String? correctedImagePath,
+  }) => copyWith(
+    correctedImagePath: correctedImagePath,
+    correctionStatus: CorrectionStatus.completed,
+    correctionType: applied
+        ? CorrectionType.curved
+        : CorrectionType.perspective,
+    correctionOutcome: applied
+        ? CorrectionOutcome.completed
+        : state == CurvatureState.flat
+        ? CorrectionOutcome.nearlyFlat
+        : CorrectionOutcome.completed,
+    clearCorrectionFailureReason: true,
+    perspectiveApplied: true,
+    curvatureState: state,
+    curvedApplied: applied,
+    curvedConfidence: confidence,
+    curvatureMagnitude: magnitude,
+    curvedRejectReason: rejectReason,
+    enhancementStatus: EnhancementStatus.none,
+    enhancementApplied: false,
+  );
 
   ScanPage withEnhancement({
     required EnhancementMode mode,
@@ -191,6 +278,7 @@ class ScanPage {
       enhancementMode: mode,
       enhancementStatus: status,
       enhancedImagePath: enhancedImagePath,
+      enhancementApplied: status == EnhancementStatus.completed,
     );
   }
 
@@ -199,6 +287,9 @@ class ScanPage {
     correctionStatus: CorrectionStatus.completed,
     correctionType: CorrectionType.perspective,
     correctionOutcome: CorrectionOutcome.completed,
+    perspectiveApplied: true,
+    curvatureState: CurvatureState.none,
+    curvedApplied: false,
     spreadFallbackUsed: true,
   );
 }

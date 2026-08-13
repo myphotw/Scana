@@ -21,27 +21,27 @@ void main() {
     bottomLeft: DocumentPoint(100, 1380),
   );
 
-  test('accepted AI Refined corners are the first automatic initial value', () {
+  test('current applied final crop is the editor source of truth', () {
     final selection = QuickCornerInitialPolicy.resolve(
       _page(
         ai: _ai(raw: raw, refined: refined, accepted: true),
       ),
     );
-    expect(selection?.source, QuickCornerInitialSource.aiRefined);
-    expect(selection?.corners, same(refined));
+    expect(selection?.source, QuickCornerInitialSource.finalCrop);
+    expect(selection?.corners.topLeft.x, 60);
   });
 
-  test('AI Raw precedes OpenCV and final crop when refinement is rejected', () {
+  test('diagnostic candidates never replace the current final crop', () {
     final selection = QuickCornerInitialPolicy.resolve(
       _page(
         ai: _ai(raw: raw, refined: refined, accepted: false),
       ),
     );
-    expect(selection?.source, QuickCornerInitialSource.aiRaw);
-    expect(selection?.corners, same(raw));
+    expect(selection?.source, QuickCornerInitialSource.finalCrop);
+    expect(selection?.corners.topLeft.x, 60);
   });
 
-  test('fallback order is OpenCV then final crop then guide', () {
+  test('legacy pages without final crop use guide only', () {
     final boundary = PageBoundary.fromCorners(
       raw,
       sourceWidth: 1000,
@@ -50,8 +50,10 @@ void main() {
       timestamp: DateTime.utc(2026, 8, 12),
     );
     expect(
-      QuickCornerInitialPolicy.resolve(_page(boundary: boundary))?.source,
-      QuickCornerInitialSource.openCvBoundary,
+      QuickCornerInitialPolicy.resolve(
+        _page(boundary: boundary, documentCorners: null),
+      ),
+      isNull,
     );
     expect(
       QuickCornerInitialPolicy.resolve(_page())?.source,
@@ -101,6 +103,73 @@ void main() {
     );
     expect(moved.x, 1000);
     expect(moved.y, 1500);
+  });
+
+  test('fixed display uses one centered BoxFit contain rect', () {
+    final transform = QuickCornerFixedDisplayTransform.contain(
+      sourceSize: const Size(1000, 1500),
+      viewportSize: const Size(400, 400),
+      margin: 20,
+    );
+    expect(transform.displayRect.height, 360);
+    expect(transform.displayRect.width, 240);
+    expect(transform.displayRect.center, const Offset(200, 200));
+    expect(
+      transform.sourceToViewport(const DocumentPoint(0, 0)),
+      const Offset(80, 20),
+    );
+    final roundTrip = transform.viewportToSource(
+      transform.sourceToViewport(const DocumentPoint(450, 900)),
+    );
+    expect(roundTrip.x, closeTo(450, 0.001));
+    expect(roundTrip.y, closeTo(900, 0.001));
+  });
+
+  test('fixed display corner movement clamps without changing its rect', () {
+    final transform = QuickCornerFixedDisplayTransform.contain(
+      sourceSize: const Size(1000, 1500),
+      viewportSize: const Size(400, 400),
+    );
+    final rect = transform.displayRect;
+    final moved = transform.moveSourcePoint(
+      point: const DocumentPoint(990, 1490),
+      screenDelta: const Offset(500, 500),
+    );
+    expect(moved.x, 1000);
+    expect(moved.y, 1500);
+    expect(transform.displayRect, rect);
+  });
+
+  test('manual corner validation rejects crossing and tiny polygons', () {
+    const source = Size(1000, 1500);
+    expect(
+      QuickCornerValidationPolicy.isValid(refined, sourceSize: source),
+      isTrue,
+    );
+    expect(
+      QuickCornerValidationPolicy.isValid(
+        const DocumentCorners(
+          topLeft: DocumentPoint(40, 50),
+          topRight: DocumentPoint(960, 1450),
+          bottomRight: DocumentPoint(960, 50),
+          bottomLeft: DocumentPoint(40, 1450),
+        ),
+        sourceSize: source,
+      ),
+      isFalse,
+    );
+    expect(
+      QuickCornerValidationPolicy.isValid(
+        const DocumentCorners(
+          topLeft: DocumentPoint(10, 10),
+          topRight: DocumentPoint(20, 10),
+          bottomRight: DocumentPoint(20, 20),
+          bottomLeft: DocumentPoint(10, 20),
+        ),
+        sourceSize: source,
+      ),
+      isFalse,
+    );
   });
 }
 

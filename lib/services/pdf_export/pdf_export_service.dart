@@ -9,6 +9,8 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 
 import 'package:scana/models/scan_page.dart';
+import 'package:scana/services/diagnostics/scan_quality_diagnostics.dart';
+import 'package:scana/services/pdf_export/pdf_raster_quality_policy.dart';
 
 enum PdfPageSizingMode { fitImage }
 
@@ -65,16 +67,19 @@ class PdfExportPage {
     required this.sourceImagePath,
     required this.rotation,
     required this.pageNo,
+    this.rawImagePath,
   });
 
   final String sourceImagePath;
   final int rotation;
   final int pageNo;
+  final String? rawImagePath;
 
   Map<String, Object> toMessage() => {
     'sourceImagePath': sourceImagePath,
     'rotation': rotation,
     'pageNo': pageNo,
+    'rawImagePath': ?rawImagePath,
   };
 }
 
@@ -95,6 +100,7 @@ class PdfExportSelection {
               sourceImagePath: page.displayImagePath,
               rotation: page.rotation,
               pageNo: page.pageNo,
+              rawImagePath: page.rawImagePath,
             ),
           )
           .toList(growable: false),
@@ -121,6 +127,7 @@ class PdfExportSelection {
               sourceImagePath: page.displayImagePath,
               rotation: page.rotation,
               pageNo: page.pageNo,
+              rawImagePath: page.rawImagePath,
             ),
           )
           .toList(growable: false),
@@ -234,7 +241,9 @@ Future<void> _generatePdfInIsolate(Map<String, Object> request) async {
       final value = pageValues[index]! as Map<Object?, Object?>;
       final imagePath = value['sourceImagePath']! as String;
       final rotation = value['rotation']! as int;
-      final bytes = await File(imagePath).readAsBytes();
+      final bytes = PdfRasterQualityPolicy.sourceBytes(
+        await File(imagePath).readAsBytes(),
+      );
       final decodedImage = pw.MemoryImage(bytes);
       final orientation = _rotatePdfOrientation(
         decodedImage.orientation,
@@ -383,6 +392,11 @@ class PdfExportWorkflow {
           page.sourceImagePath,
         );
       }
+      await ScanQualityDiagnostics.recordPdfSource(
+        sourceImagePath: page.sourceImagePath,
+        rawImagePath: page.rawImagePath,
+        pageNo: page.pageNo,
+      );
     }
     final fileName = PdfFileNamePolicy.sanitize(requestedFileName);
     final temporaryDirectory = await temporaryDirectoryProvider();

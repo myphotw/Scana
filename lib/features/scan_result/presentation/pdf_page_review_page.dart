@@ -208,6 +208,8 @@ class _PdfPageReviewPageState extends State<PdfPageReviewPage>
                             onTap: () => _openViewer(index),
                             onQuickEdit: () =>
                                 _quickEditCorners(page.rawImagePath),
+                            onDelete: () =>
+                                _deleteReviewPage(page.rawImagePath),
                           ),
                         );
                       },
@@ -361,6 +363,41 @@ class _PdfPageReviewPageState extends State<PdfPageReviewPage>
       );
       if (orderIndex >= 0) _orderedPages[orderIndex] = updated;
     });
+  }
+
+  Future<void> _deleteReviewPage(String rawImagePath) async {
+    if (_isDragging || _exportFlowActive) return;
+    final sessionPages =
+        widget.sessionManager.currentSession?.pages ?? const [];
+    final sessionIndex = sessionPages.indexWhere(
+      (page) => page.rawImagePath == rawImagePath,
+    );
+    if (sessionIndex < 0) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('페이지 삭제'),
+        content: const Text('현재 페이지와 관련 원본·보정 파일을 삭제합니다.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('취소'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('삭제'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || confirmed != true) return;
+    await widget.sessionManager.deletePageAt(sessionIndex);
+    if (!mounted) return;
+    setState(() {
+      _orderedPages.removeWhere((page) => page.rawImagePath == rawImagePath);
+      _reorderRevision++;
+    });
+    if (_orderedPages.isEmpty && mounted) Navigator.of(context).pop();
   }
 
   Future<void> _startPdfExport() async {
@@ -707,6 +744,7 @@ class _ReviewDragTarget extends StatelessWidget {
     required this.onAccept,
     required this.onTap,
     required this.onQuickEdit,
+    required this.onDelete,
   });
 
   final ScanPage page;
@@ -719,6 +757,7 @@ class _ReviewDragTarget extends StatelessWidget {
   final ValueChanged<String> onAccept;
   final VoidCallback onTap;
   final VoidCallback onQuickEdit;
+  final VoidCallback onDelete;
 
   @override
   Widget build(BuildContext context) {
@@ -769,6 +808,7 @@ class _ReviewDragTarget extends StatelessWidget {
             elevated: highlighted || isDragging,
             onTap: onTap,
             onQuickEdit: onQuickEdit,
+            onDelete: onDelete,
           ),
         );
       },
@@ -784,6 +824,7 @@ class _ReviewCard extends StatelessWidget {
     this.elevated = false,
     this.onTap,
     this.onQuickEdit,
+    this.onDelete,
   });
 
   final ScanPage page;
@@ -791,6 +832,7 @@ class _ReviewCard extends StatelessWidget {
   final bool elevated;
   final VoidCallback? onTap;
   final VoidCallback? onQuickEdit;
+  final VoidCallback? onDelete;
 
   @override
   Widget build(BuildContext context) {
@@ -805,39 +847,59 @@ class _ReviewCard extends StatelessWidget {
           width: elevated ? 2 : 1,
         ),
       ),
-      child: InkWell(
-        onTap: onTap,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            Padding(
-              padding: const EdgeInsets.only(top: 36),
-              child: _ReviewImage(page: page),
-            ),
-            Positioned(
-              top: 8,
-              left: 8,
-              child: CircleAvatar(
-                key: ValueKey('pdf-review-number-${page.rawImagePath}'),
-                radius: 14,
-                backgroundColor: colorScheme.primary,
-                foregroundColor: colorScheme.onPrimary,
-                child: Text('${pdfIndex + 1}'),
+      child: Column(
+        children: [
+          Expanded(
+            child: InkWell(
+              onTap: onTap,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(top: 36),
+                    child: _ReviewImage(page: page),
+                  ),
+                  Positioned(
+                    top: 8,
+                    left: 8,
+                    child: CircleAvatar(
+                      key: ValueKey('pdf-review-number-${page.rawImagePath}'),
+                      radius: 14,
+                      backgroundColor: colorScheme.primary,
+                      foregroundColor: colorScheme.onPrimary,
+                      child: Text('${pdfIndex + 1}'),
+                    ),
+                  ),
+                ],
               ),
             ),
-            if (onQuickEdit != null)
-              Positioned(
-                top: 2,
-                right: 2,
-                child: IconButton.filledTonal(
+          ),
+          SizedBox(
+            key: ValueKey('pdf-review-action-row-${page.rawImagePath}'),
+            height: 40,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                IconButton(
+                  tooltip: '확대',
+                  onPressed: onTap,
+                  icon: const Icon(Icons.zoom_out_map, size: 19),
+                ),
+                IconButton(
                   key: ValueKey('pdf-review-quick-corner-${page.rawImagePath}'),
                   tooltip: '모서리 수정',
                   onPressed: onQuickEdit,
-                  icon: const Icon(Icons.crop_free, size: 20),
+                  icon: const Icon(Icons.crop_free, size: 19),
                 ),
-              ),
-          ],
-        ),
+                IconButton(
+                  tooltip: '페이지 삭제',
+                  onPressed: onDelete,
+                  icon: const Icon(Icons.delete_outline, size: 19),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -855,6 +917,7 @@ class _ReviewImage extends StatelessWidget {
       child: Image.file(
         File(page.displayImagePath),
         fit: BoxFit.contain,
+        filterQuality: FilterQuality.medium,
         errorBuilder: (context, error, stackTrace) =>
             const Center(child: Icon(Icons.image_not_supported_outlined)),
       ),

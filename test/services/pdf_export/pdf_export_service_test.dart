@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as path;
@@ -10,6 +11,7 @@ import 'package:scana/models/scan_capture_mode.dart';
 import 'package:scana/models/scan_page.dart';
 import 'package:scana/models/page_enhancement.dart';
 import 'package:scana/services/pdf_export/pdf_export_service.dart';
+import 'package:scana/services/pdf_export/pdf_raster_quality_policy.dart';
 import 'package:scana/services/storage/scan_session_storage.dart';
 
 void main() {
@@ -118,6 +120,12 @@ void main() {
     expect(selection.pages.map((page) => page.pageNo), [3, 1, 2]);
     expect(selection.pages.last.sourceImagePath, '/corrected_2.jpg');
     expect(pages.map((page) => page.pageNo), [1, 2, 3]);
+  });
+
+  test('PDF input bytes are not pre-resized before MemoryImage', () {
+    final bytes = Uint8List.fromList([11, 22, 33]);
+    expect(PdfRasterQualityPolicy.preResize, false);
+    expect(identical(PdfRasterQualityPolicy.sourceBytes(bytes), bytes), true);
   });
 
   test('ordered selection ignores pages deleted after gallery entry', () {

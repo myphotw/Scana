@@ -85,9 +85,9 @@ class _ScanResultViewerPageState extends State<ScanResultViewerPage> {
             actions: [
               IconButton(
                 key: const ValueKey('viewer-detailed-editor-button'),
-                tooltip: '상세 편집',
+                tooltip: '페이지 편집',
                 onPressed: () => _openDetailedEditor(currentIndex),
-                icon: const Icon(Icons.tune),
+                icon: const Icon(Icons.edit_outlined),
               ),
               IconButton(
                 key: const ValueKey('viewer-rotate-button'),
@@ -118,27 +118,30 @@ class _ScanResultViewerPageState extends State<ScanResultViewerPage> {
               child: Row(
                 children: [
                   Expanded(
-                    child: OutlinedButton.icon(
+                    child: _ViewerActionButton(
+                      key: const ValueKey('viewer-retake-button'),
                       onPressed: () => _retake(currentIndex),
-                      icon: const Icon(Icons.camera_alt_outlined),
-                      label: const Text('재촬영'),
+                      icon: Icons.camera_alt_outlined,
+                      label: '재촬영',
                     ),
                   ),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: OutlinedButton.icon(
+                    child: _ViewerActionButton(
                       key: const ValueKey('viewer-quick-corner-button'),
                       onPressed: () => _quickEdit(currentIndex),
-                      icon: const Icon(Icons.crop_free),
-                      label: const Text('모서리 수정'),
+                      icon: Icons.crop_free,
+                      label: '모서리 수정',
                     ),
                   ),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: FilledButton.icon(
+                    child: _ViewerActionButton(
+                      key: const ValueKey('viewer-delete-button'),
+                      filled: true,
                       onPressed: () => _delete(currentIndex),
-                      icon: const Icon(Icons.delete_outline),
-                      label: const Text('삭제'),
+                      icon: Icons.delete_outline,
+                      label: '삭제',
                     ),
                   ),
                 ],
@@ -261,6 +264,46 @@ class _ScanResultViewerPageState extends State<ScanResultViewerPage> {
   }
 }
 
+class _ViewerActionButton extends StatelessWidget {
+  const _ViewerActionButton({
+    super.key,
+    required this.onPressed,
+    required this.icon,
+    required this.label,
+    this.filled = false,
+  });
+
+  final VoidCallback? onPressed;
+  final IconData icon;
+  final String label;
+  final bool filled;
+
+  @override
+  Widget build(BuildContext context) {
+    final style = ButtonStyle(
+      minimumSize: const WidgetStatePropertyAll(Size.fromHeight(48)),
+      padding: const WidgetStatePropertyAll(
+        EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+      ),
+      iconSize: const WidgetStatePropertyAll(20),
+      visualDensity: VisualDensity.standard,
+    );
+    return filled
+        ? FilledButton.icon(
+            onPressed: onPressed,
+            style: style,
+            icon: Icon(icon),
+            label: Text(label, textAlign: TextAlign.center),
+          )
+        : OutlinedButton.icon(
+            onPressed: onPressed,
+            style: style,
+            icon: Icon(icon),
+            label: Text(label, textAlign: TextAlign.center),
+          );
+  }
+}
+
 class _ScanResultImage extends StatelessWidget {
   const _ScanResultImage({required this.page});
 
@@ -278,6 +321,7 @@ class _ScanResultImage extends StatelessWidget {
           child: Image.file(
             File(imagePath),
             fit: BoxFit.contain,
+            filterQuality: FilterQuality.medium,
             errorBuilder: (context, error, stackTrace) => const Column(
               mainAxisSize: MainAxisSize.min,
               children: [

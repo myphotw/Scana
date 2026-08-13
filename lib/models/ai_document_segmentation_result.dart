@@ -23,6 +23,10 @@ class AiDocumentSegmentationResult {
     this.refinementAttempted = false,
     this.refinementAccepted = false,
     this.refinedCorners,
+    this.paperContour = const [],
+    this.finalCorners,
+    this.finalSource,
+    this.edgeVisibilities = const {},
     this.refinementFailureReason,
     this.maskToSearchRoiMs = 0,
     this.paperCandidateMs = 0,
@@ -50,6 +54,7 @@ class AiDocumentSegmentationResult {
     this.debugAiOverlayFile,
     this.debugAiRawOverlayFile,
     this.debugAiRefinedOverlayFile,
+    this.debugAiFinalOverlayFile,
     this.debugSearchRoiFile,
     this.debugEnvelopeOverlayFile,
     this.debugOpenCvOverlayFile,
@@ -74,6 +79,13 @@ class AiDocumentSegmentationResult {
   final bool refinementAttempted;
   final bool refinementAccepted;
   final DocumentCorners? refinedCorners;
+
+  /// Existing AI refinement paper envelope samples in source-image pixels.
+  /// They are diagnostic geometry and never replace the final crop polygon.
+  final List<DocumentPoint> paperContour;
+  final DocumentCorners? finalCorners;
+  final AiFinalBoundarySource? finalSource;
+  final Map<AiBoundaryEdgeName, AiEdgeVisibility> edgeVisibilities;
   final String? refinementFailureReason;
   final int maskToSearchRoiMs;
   final int paperCandidateMs;
@@ -104,6 +116,7 @@ class AiDocumentSegmentationResult {
   final String? debugAiOverlayFile;
   final String? debugAiRawOverlayFile;
   final String? debugAiRefinedOverlayFile;
+  final String? debugAiFinalOverlayFile;
   final String? debugSearchRoiFile;
   final String? debugEnvelopeOverlayFile;
   final String? debugOpenCvOverlayFile;
@@ -114,6 +127,7 @@ class AiDocumentSegmentationResult {
     debugAiOverlayFile,
     debugAiRawOverlayFile,
     debugAiRefinedOverlayFile,
+    debugAiFinalOverlayFile,
     debugSearchRoiFile,
     debugEnvelopeOverlayFile,
     debugOpenCvOverlayFile,
@@ -122,6 +136,8 @@ class AiDocumentSegmentationResult {
   bool get hasUsableBoundary => success && corners != null;
   bool get hasUsableRefinedBoundary =>
       success && refinementAccepted && refinedCorners != null;
+  bool get hasUsableFinalBoundary =>
+      success && finalCorners != null && finalSource != null;
 
   String? resolveDebugArtifact(String sessionDirectory, String? relative) {
     final canonical = _canonicalRelativePath(relative);
@@ -149,6 +165,14 @@ class AiDocumentSegmentationResult {
     'refinementAttempted': refinementAttempted,
     'refinementAccepted': refinementAccepted,
     'refinedCorners': ?refinedCorners?.toJson(),
+    if (paperContour.isNotEmpty)
+      'paperContour': paperContour.map((point) => point.toJson()).toList(),
+    'finalCorners': ?finalCorners?.toJson(),
+    'finalSource': ?finalSource?.serializedName,
+    if (edgeVisibilities.isNotEmpty)
+      'edgeVisibilities': edgeVisibilities.values
+          .map((edge) => edge.toJson())
+          .toList(),
     'refinementFailureReason': ?refinementFailureReason,
     'maskToSearchRoiMs': maskToSearchRoiMs,
     'paperCandidateMs': paperCandidateMs,
@@ -179,6 +203,8 @@ class AiDocumentSegmentationResult {
       'debugAiRawOverlayFile': debugAiRawOverlayFile!,
     if (_isSafeRelativePath(debugAiRefinedOverlayFile))
       'debugAiRefinedOverlayFile': debugAiRefinedOverlayFile!,
+    if (_isSafeRelativePath(debugAiFinalOverlayFile))
+      'debugAiFinalOverlayFile': debugAiFinalOverlayFile!,
     if (_isSafeRelativePath(debugSearchRoiFile))
       'debugSearchRoiFile': debugSearchRoiFile!,
     if (_isSafeRelativePath(debugEnvelopeOverlayFile))
@@ -196,9 +222,26 @@ class AiDocumentSegmentationResult {
         values.whereType<num>().map((item) => item.toInt()).toList(),
       _ => const [],
     };
+    List<DocumentPoint> points(String key) => switch (value[key]) {
+      final List values =>
+        values
+            .map(DocumentPoint.fromJson)
+            .whereType<DocumentPoint>()
+            .toList(growable: false),
+      _ => const [],
+    };
     String? artifact(String key) {
       final candidate = value[key] as String?;
       return _canonicalRelativePath(candidate);
+    }
+
+    final edgeVisibilities = <AiBoundaryEdgeName, AiEdgeVisibility>{};
+    final serializedEdges = value['edgeVisibilities'];
+    if (serializedEdges is List) {
+      for (final item in serializedEdges) {
+        final parsed = AiEdgeVisibility.fromJson(item);
+        if (parsed != null) edgeVisibilities[parsed.edge] = parsed;
+      }
     }
 
     final success = value['success'];
@@ -223,6 +266,12 @@ class AiDocumentSegmentationResult {
       refinementAttempted: value['refinementAttempted'] as bool? ?? false,
       refinementAccepted: value['refinementAccepted'] as bool? ?? false,
       refinedCorners: DocumentCorners.fromJson(value['refinedCorners']),
+      paperContour: points('paperContour'),
+      finalCorners: DocumentCorners.fromJson(value['finalCorners']),
+      finalSource: AiFinalBoundarySource.fromSerialized(
+        value['finalSource'] as String?,
+      ),
+      edgeVisibilities: edgeVisibilities,
       refinementFailureReason: value['refinementFailureReason'] as String?,
       maskToSearchRoiMs: integer('maskToSearchRoiMs'),
       paperCandidateMs: integer('paperCandidateMs'),
@@ -255,6 +304,7 @@ class AiDocumentSegmentationResult {
       debugAiOverlayFile: artifact('debugAiOverlayFile'),
       debugAiRawOverlayFile: artifact('debugAiRawOverlayFile'),
       debugAiRefinedOverlayFile: artifact('debugAiRefinedOverlayFile'),
+      debugAiFinalOverlayFile: artifact('debugAiFinalOverlayFile'),
       debugSearchRoiFile: artifact('debugSearchRoiFile'),
       debugEnvelopeOverlayFile: artifact('debugEnvelopeOverlayFile'),
       debugOpenCvOverlayFile: artifact('debugOpenCvOverlayFile'),
@@ -319,6 +369,105 @@ enum AiRefinedBoundaryStatus {
       orElse: () => accepted
           ? AiRefinedBoundaryStatus.accepted
           : AiRefinedBoundaryStatus.rawFallback,
+    );
+  }
+}
+
+enum AiFinalBoundarySource {
+  refined('ai_refined'),
+  hybrid('ai_hybrid'),
+  rawFallback('ai_raw_fallback');
+
+  const AiFinalBoundarySource(this.serializedName);
+
+  final String serializedName;
+
+  static AiFinalBoundarySource? fromSerialized(String? value) =>
+      AiFinalBoundarySource.values
+          .where((source) => source.serializedName == value)
+          .firstOrNull;
+}
+
+enum AiBoundaryEdgeName {
+  top,
+  right,
+  bottom,
+  left;
+
+  static AiBoundaryEdgeName? fromSerialized(String? value) =>
+      AiBoundaryEdgeName.values.where((edge) => edge.name == value).firstOrNull;
+}
+
+enum AiEdgeVisibilityStatus {
+  confirmed,
+  weak,
+  occluded,
+  outOfFrame,
+  unknown;
+
+  String get serializedName => this == outOfFrame ? 'out_of_frame' : name;
+
+  static AiEdgeVisibilityStatus fromSerialized(String? value) =>
+      switch (value) {
+        'confirmed' => confirmed,
+        'weak' => weak,
+        'occluded' => occluded,
+        'out_of_frame' => outOfFrame,
+        _ => unknown,
+      };
+}
+
+class AiEdgeVisibility {
+  const AiEdgeVisibility({
+    required this.edge,
+    required this.transitionScore,
+    required this.supportingSampleRatio,
+    required this.borderDistance,
+    required this.occlusionPenalty,
+    required this.confidence,
+    required this.status,
+    this.foregroundBeyond = false,
+    this.paperContinuesBeyond = false,
+  });
+
+  final AiBoundaryEdgeName edge;
+  final double transitionScore;
+  final double supportingSampleRatio;
+  final double borderDistance;
+  final double occlusionPenalty;
+  final double confidence;
+  final AiEdgeVisibilityStatus status;
+  final bool foregroundBeyond;
+  final bool paperContinuesBeyond;
+
+  Map<String, Object> toJson() => {
+    'edge': edge.name,
+    'transitionScore': transitionScore,
+    'supportingSampleRatio': supportingSampleRatio,
+    'borderDistance': borderDistance,
+    'occlusionPenalty': occlusionPenalty,
+    'confidence': confidence,
+    'status': status.serializedName,
+    if (foregroundBeyond) 'foregroundBeyond': true,
+    if (paperContinuesBeyond) 'paperContinuesBeyond': true,
+  };
+
+  static AiEdgeVisibility? fromJson(Object? value) {
+    if (value is! Map) return null;
+    final edge = AiBoundaryEdgeName.fromSerialized(value['edge'] as String?);
+    if (edge == null) return null;
+    double metric(String key) =>
+        ((value[key] as num?)?.toDouble() ?? 0).clamp(0.0, 1.0);
+    return AiEdgeVisibility(
+      edge: edge,
+      transitionScore: metric('transitionScore'),
+      supportingSampleRatio: metric('supportingSampleRatio'),
+      borderDistance: metric('borderDistance'),
+      occlusionPenalty: metric('occlusionPenalty'),
+      confidence: metric('confidence'),
+      status: AiEdgeVisibilityStatus.fromSerialized(value['status'] as String?),
+      foregroundBeyond: value['foregroundBeyond'] as bool? ?? false,
+      paperContinuesBeyond: value['paperContinuesBeyond'] as bool? ?? false,
     );
   }
 }

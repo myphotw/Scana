@@ -140,6 +140,8 @@ class MainActivity : FlutterActivity() {
                             val debugStem = call.argument<String>("debugStem") ?: "page"
                             val openCvCorners =
                                 call.argument<List<Map<String, Number>>>("openCvCorners")
+                            val expectedGuideCorners =
+                                call.argument<List<Map<String, Number>>>("expectedGuideCorners")
                             if (imagePath.isNullOrBlank()) {
                                 result.error(
                                     "invalid_ai_image_path",
@@ -156,6 +158,7 @@ class MainActivity : FlutterActivity() {
                                     debugOutputDirectory = debugOutputDirectory,
                                     debugStem = debugStem,
                                     openCvCorners = openCvCorners,
+                                    expectedGuideCorners = expectedGuideCorners,
                                 )
                             }
                         }
@@ -202,6 +205,7 @@ class MainActivity : FlutterActivity() {
                                     pageBoundaryMode,
                                     curvePolicy,
                                     pageBoundary,
+                                    isDebuggable,
                                 )
                             runOnUiThread { result.success(correction) }
                         } catch (error: Throwable) {
@@ -213,7 +217,11 @@ class MainActivity : FlutterActivity() {
                                         "correction_failed"
                                     },
                                     error.message ?: "Page correction failed.",
-                                    null,
+                                    if (error is CurvedCorrectionException) {
+                                        error.details
+                                    } else {
+                                        null
+                                    },
                                 )
                             }
                         }
@@ -250,6 +258,7 @@ class MainActivity : FlutterActivity() {
                                 sourceImagePath,
                                 outputImagePath,
                                 enhancementMode,
+                                isDebuggable,
                             )
                             debugLog(
                                 "IMAGE_PROCESSING",

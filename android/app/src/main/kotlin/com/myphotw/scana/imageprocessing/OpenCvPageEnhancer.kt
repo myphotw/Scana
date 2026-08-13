@@ -7,7 +7,6 @@ import org.opencv.android.OpenCVLoader
 import org.opencv.core.Core
 import org.opencv.core.CvType
 import org.opencv.core.Mat
-import org.opencv.core.MatOfInt
 import org.opencv.core.Scalar
 import org.opencv.core.Size
 import org.opencv.imgcodecs.Imgcodecs
@@ -16,7 +15,6 @@ import org.opencv.imgproc.Imgproc
 /** Full-resolution, paper-aware document appearance enhancement. */
 object OpenCvPageEnhancer {
     private const val ANALYSIS_MAX_DIMENSION = 1200.0
-    private const val JPEG_QUALITY = 96
     private const val PAPER_TARGET_LUMINANCE = 238.0
     private const val PAPER_MIN_LUMINANCE = 142.0
     private const val PAPER_MAX_CHROMA_DISTANCE = 22.0
@@ -25,13 +23,16 @@ object OpenCvPageEnhancer {
     private const val FOREGROUND_MAX_LUMINANCE = 205.0
     private const val FOREGROUND_MIN_DARK_DETAIL = 3.0
     private const val FOREGROUND_MIN_BACKGROUND = 158.0
-    private const val SHARPEN_AMOUNT = 0.24
+    private const val SOURCE_LUMINANCE_BLEND = 0.07
+    private const val FOREGROUND_DARKENING_AMOUNT = 0.20
+    private const val SHARPEN_AMOUNT = 0.17
     private val openCvReady: Boolean by lazy { OpenCVLoader.initLocal() }
 
     fun enhance(
         sourceImagePath: String,
         outputImagePath: String,
         mode: String,
+        qualityDiagnosticsEnabled: Boolean,
     ): Map<String, Any> {
         check(openCvReady) { "OpenCV initialization failed." }
         val startedAt = System.nanoTime()
@@ -58,18 +59,33 @@ object OpenCvPageEnhancer {
             check(output.cols() == source.cols() && output.rows() == source.rows()) {
                 "Enhancement changed the corrected image resolution."
             }
-            val parameters = MatOfInt(Imgcodecs.IMWRITE_JPEG_QUALITY, JPEG_QUALITY)
-            val written = try {
-                Imgcodecs.imwrite(outputImagePath, output, parameters)
-            } finally {
-                parameters.release()
+            val sourceQuality = if (qualityDiagnosticsEnabled) {
+                OpenCvImageQuality.metrics(source, "source")
+            } else {
+                emptyMap()
             }
+            val outputQuality = if (qualityDiagnosticsEnabled) {
+                OpenCvImageQuality.metrics(output, "output")
+            } else {
+                emptyMap()
+            }
+            val written = OpenCvImageQuality.write(outputImagePath, output)
             check(written) { "The enhanced image could not be written." }
             return mutableMapOf<String, Any>(
                 "outputWidth" to output.cols(),
                 "outputHeight" to output.rows(),
                 "processingMilliseconds" to elapsedMilliseconds(startedAt),
-            ).apply { putAll(stageTimings) }
+                "outputFormat" to java.io.File(outputImagePath).extension.lowercase(),
+            ).apply {
+                putAll(sourceQuality)
+                putAll(outputQuality)
+                putAll(stageTimings)
+                if (mode == "scanColor") {
+                    put("sharpeningAmount", SHARPEN_AMOUNT)
+                    put("foregroundDarkeningAmount", FOREGROUND_DARKENING_AMOUNT)
+                    put("sourceLuminanceBlend", SOURCE_LUMINANCE_BLEND)
+                }
+            }
         } finally {
             output?.release()
             source.release()
@@ -240,7 +256,14 @@ object OpenCvPageEnhancer {
                 divided,
                 PAPER_TARGET_LUMINANCE,
             )
-            Core.addWeighted(luminance, 0.07, divided, 0.93, 0.0, normalized)
+            Core.addWeighted(
+                luminance,
+                SOURCE_LUMINANCE_BLEND,
+                divided,
+                1.0 - SOURCE_LUMINANCE_BLEND,
+                0.0,
+                normalized,
+            )
             succeeded = true
             return normalized
         } finally {
@@ -512,7 +535,7 @@ object OpenCvPageEnhancer {
             ((FOREGROUND_MAX_LUMINANCE - value) / FOREGROUND_MAX_LUMINANCE)
                 .coerceIn(0.0, 1.0),
         )
-        return (value * (1.0 - 0.27 * strength)).roundToInt()
+        return (value * (1.0 - FOREGROUND_DARKENING_AMOUNT * strength)).roundToInt()
     }
 
     private fun enhanceGrayscale(source: Mat): Mat {

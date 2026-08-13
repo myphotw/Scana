@@ -62,6 +62,7 @@ class FairScanDocumentSegmenter(private val context: Context) : Closeable {
         debugOutputDirectory: String?,
         debugStem: String,
         openCvCorners: List<Map<String, Number>>?,
+        expectedGuideCorners: List<Map<String, Number>>?,
     ): Map<String, Any> {
         val totalStart = SystemClock.elapsedRealtime()
         var source: Mat? = null
@@ -129,7 +130,12 @@ class FairScanDocumentSegmenter(private val context: Context) : Closeable {
             Imgproc.threshold(probability, binary, MASK_THRESHOLD, 255.0, Imgproc.THRESH_BINARY)
             binary.convertTo(binary, CvType.CV_8UC1)
             refined = refineMask(binary)
-            val component = selectLargestPlausibleComponent(refined)
+            val component = selectLargestPlausibleComponent(
+                refined,
+                expectedGuideCorners = expectedGuideCorners,
+                sourceWidth = sourceWidth,
+                sourceHeight = sourceHeight,
+            )
                 ?: return failure(
                     reason = "empty_mask",
                     totalStart = totalStart,
@@ -219,6 +225,31 @@ class FairScanDocumentSegmenter(private val context: Context) : Closeable {
                 "refinementAccepted" to refinement.accepted,
                 "refinedCorners" to refinement.corners.orEmpty().map {
                     mapOf("x" to it.x, "y" to it.y)
+                },
+                // Reuse the already-computed owned paper contour as optional
+                // curvature geometry. This does not change AI crop scoring.
+                "paperContour" to refinement.paperContour.orEmpty().let { contour ->
+                    val step = max(1, contour.size / MAX_CURVATURE_CONTOUR_SAMPLES)
+                    contour.filterIndexed { index, _ -> index % step == 0 }
+                        .take(MAX_CURVATURE_CONTOUR_SAMPLES)
+                        .map { mapOf("x" to it.x, "y" to it.y) }
+                },
+                "finalCorners" to refinement.finalCorners.orEmpty().map {
+                    mapOf("x" to it.x, "y" to it.y)
+                },
+                "finalSource" to (refinement.finalSource ?: "none"),
+                "edgeVisibilities" to refinement.edgeVisibilities.map { edge ->
+                    mapOf(
+                        "edge" to edge.edge,
+                        "transitionScore" to edge.transitionScore,
+                        "supportingSampleRatio" to edge.supportingSampleRatio,
+                        "borderDistance" to edge.borderDistance,
+                        "occlusionPenalty" to edge.occlusionPenalty,
+                        "confidence" to edge.confidence,
+                        "status" to edge.status,
+                        "foregroundBeyond" to edge.foregroundBeyond,
+                        "paperContinuesBeyond" to edge.paperContinuesBeyond,
+                    )
                 },
                 "refinementFailureReason" to (refinement.failureReason ?: "none"),
                 "maskToSearchRoiMs" to refinement.maskToSearchRoiMs,
@@ -323,7 +354,12 @@ class FairScanDocumentSegmenter(private val context: Context) : Closeable {
         val score: Double,
     )
 
-    private fun selectLargestPlausibleComponent(mask: Mat): Component? {
+    private fun selectLargestPlausibleComponent(
+        mask: Mat,
+        expectedGuideCorners: List<Map<String, Number>>?,
+        sourceWidth: Int,
+        sourceHeight: Int,
+    ): Component? {
         val contours = mutableListOf<MatOfPoint>()
         val hierarchy = Mat()
         val copy = mask.clone()
@@ -331,6 +367,16 @@ class FairScanDocumentSegmenter(private val context: Context) : Closeable {
             Imgproc.findContours(copy, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
             val imageArea = mask.cols().toDouble() * mask.rows()
             val imageCenter = Point(mask.cols() / 2.0, mask.rows() / 2.0)
+            val guideCenter = expectedGuideCorners
+                ?.takeIf { it.size == 4 && sourceWidth > 0 && sourceHeight > 0 }
+                ?.let { corners ->
+                    Point(
+                        corners.mapNotNull { it["x"]?.toDouble() }.average() /
+                            sourceWidth * mask.cols(),
+                        corners.mapNotNull { it["y"]?.toDouble() }.average() /
+                            sourceHeight * mask.rows(),
+                    )
+                }
             val maxCenterDistance = hypot(imageCenter.x, imageCenter.y).coerceAtLeast(1.0)
             val selected = contours
                 .mapNotNull { contour ->
@@ -365,13 +411,29 @@ class FairScanDocumentSegmenter(private val context: Context) : Closeable {
                     } finally {
                         centerCurve.release()
                     }
+                    val guideScore = if (guideCenter == null) {
+                        0.0
+                    } else {
+                        val guideDistance = hypot(
+                            contourCenter.x - guideCenter.x,
+                            contourCenter.y - guideCenter.y,
+                        )
+                        val maxGuideDistance = hypot(mask.cols().toDouble(), mask.rows().toDouble())
+                            .coerceAtLeast(1.0)
+                        (1.0 - guideDistance / maxGuideDistance).coerceIn(0.0, 1.0)
+                    }
                     val aspectScore =
                         (1.0 - (aspectRatio - 1.0) / (MAX_COMPONENT_ASPECT_RATIO - 1.0))
                             .coerceIn(0.0, 1.0)
+                    val score = if (guideCenter == null) {
+                        areaRatio * 0.70 + centerCoverage * 0.20 + aspectScore * 0.10
+                    } else {
+                        areaRatio * 0.64 + centerCoverage * 0.18 + aspectScore * 0.08 + guideScore * 0.10
+                    }
                     Component(
                         contour = contour,
                         area = area,
-                        score = areaRatio * 0.70 + centerCoverage * 0.20 + aspectScore * 0.10,
+                        score = score,
                     )
                 }
                 .maxWithOrNull(compareBy<Component> { it.score }.thenBy { it.area })
@@ -470,15 +532,23 @@ class FairScanDocumentSegmenter(private val context: Context) : Closeable {
             val aiRawOverlayFile = File(directory, "${stem}_ai_raw_overlay.jpg")
             Imgcodecs.imwrite(aiRawOverlayFile.absolutePath, aiRawOverlay)
 
-            val aiRefinedOverlay = source.clone()
-            val searchOverlay = source.clone()
-            try {
+                val aiRefinedOverlay = source.clone()
+                val aiFinalOverlay = source.clone()
+                val searchOverlay = source.clone()
+                try {
                 drawCorners(aiRefinedOverlay, aiRawCorners, Scalar(80.0, 180.0, 255.0), 5)
                 refinement.corners?.let {
                     drawCorners(aiRefinedOverlay, it, Scalar(30.0, 255.0, 30.0), 8)
                 }
                 val aiRefinedOverlayFile = File(directory, "${stem}_ai_refined_overlay.jpg")
                 Imgcodecs.imwrite(aiRefinedOverlayFile.absolutePath, aiRefinedOverlay)
+
+                drawCorners(aiFinalOverlay, aiRawCorners, Scalar(80.0, 180.0, 255.0), 4)
+                refinement.finalCorners?.let {
+                    drawCorners(aiFinalOverlay, it, Scalar(30.0, 255.0, 30.0), 8)
+                }
+                val aiFinalOverlayFile = File(directory, "${stem}_ai_final_overlay.jpg")
+                Imgcodecs.imwrite(aiFinalOverlayFile.absolutePath, aiFinalOverlay)
 
                 val roi = refinement.searchRoi
                 if (roi.width > 0 && roi.height > 0) {
@@ -541,6 +611,7 @@ class FairScanDocumentSegmenter(private val context: Context) : Closeable {
                         "debugAiOverlayPath" to aiRawOverlayFile.absolutePath,
                         "debugAiRawOverlayPath" to aiRawOverlayFile.absolutePath,
                         "debugAiRefinedOverlayPath" to aiRefinedOverlayFile.absolutePath,
+                        "debugAiFinalOverlayPath" to aiFinalOverlayFile.absolutePath,
                         "debugSearchRoiPath" to searchRoiFile.absolutePath,
                         "debugEnvelopeOverlayPath" to envelopeOverlayFile.absolutePath,
                         "debugOpenCvOverlayPath" to openCvOverlayFile.absolutePath,
@@ -550,6 +621,7 @@ class FairScanDocumentSegmenter(private val context: Context) : Closeable {
                 }
             } finally {
                 aiRefinedOverlay.release()
+                aiFinalOverlay.release()
                 searchOverlay.release()
             }
         } finally {
@@ -615,5 +687,6 @@ class FairScanDocumentSegmenter(private val context: Context) : Closeable {
         const val MIN_COMPONENT_AREA_RATIO = 0.02
         const val MAX_COMPONENT_AREA_RATIO = 0.995
         const val MAX_COMPONENT_ASPECT_RATIO = 8.0
+        const val MAX_CURVATURE_CONTOUR_SAMPLES = 192
     }
 }
