@@ -93,6 +93,68 @@ void main() {
     );
   });
 
+  test('production Perspective warp uses cubic resampling only', () {
+    final source = File(
+      'android/app/src/main/kotlin/com/myphotw/scana/imageprocessing/'
+      'OpenCvPageCorrector.kt',
+    ).readAsStringSync();
+    final productionStart = source.indexOf('private fun applyPerspective(');
+    final helperStart = source.indexOf(
+      'private fun warpPerspectiveWithTiming(',
+    );
+    final production = source.substring(productionStart, helperStart);
+
+    expect(production, contains('Imgproc.INTER_CUBIC'));
+    expect(production, isNot(contains('Imgproc.INTER_LINEAR')));
+    expect(production, isNot(contains('Imgproc.INTER_LANCZOS4')));
+    expect(
+      source,
+      contains(
+        'warpPerspectiveWithTiming(\n'
+        '                source,\n'
+        '                transform,\n'
+        '                Imgproc.INTER_CUBIC,',
+      ),
+    );
+    expect(source, contains('Core.BORDER_REPLICATE'));
+    expect(source, contains('Scalar.all(255.0)'));
+  });
+
+  test('DEBUG Perspective comparison keeps all interpolation variants', () {
+    final source = File(
+      'android/app/src/main/kotlin/com/myphotw/scana/imageprocessing/'
+      'OpenCvPageCorrector.kt',
+    ).readAsStringSync();
+    final comparisonStart = source.indexOf(
+      'private fun writePerspectiveInterpolationComparison(',
+    );
+    final variantWriterStart = source.indexOf(
+      'private fun writePerspectiveComparisonVariant(',
+    );
+    final comparison = source.substring(comparisonStart, variantWriterStart);
+
+    expect(comparison, contains('Imgproc.INTER_LINEAR'));
+    expect(comparison, contains('Imgproc.INTER_LANCZOS4'));
+    expect(comparison, contains('perspective_linear.png'));
+    expect(comparison, contains('perspective_cubic.png'));
+    expect(comparison, contains('perspective_lanczos4.png'));
+    expect(comparison, contains('interpolation_report.json'));
+    expect(comparison, contains('"productionInterpolation", "INTER_CUBIC"'));
+    expect(comparison, contains('"linearMs"'));
+    expect(comparison, contains('"cubicMs"'));
+    expect(comparison, contains('"lanczos4Ms"'));
+    expect(comparison, contains('"linearLaplacianVariance"'));
+    expect(comparison, contains('"cubicLaplacianVariance"'));
+    expect(comparison, contains('"lanczos4LaplacianVariance"'));
+    expect(
+      comparison,
+      contains(
+        'debug_quality/\${sourceFile.nameWithoutExtension}/'
+        'interpolation_compare',
+      ),
+    );
+  });
+
   test('background speckle warning requires a substantial regression', () {
     expect(
       ScanQualityDiagnosticPolicy.backgroundSpeckleAmplified(

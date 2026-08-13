@@ -22,6 +22,8 @@ import org.opencv.core.Scalar
 import org.opencv.core.Size
 import org.opencv.imgcodecs.Imgcodecs
 import org.opencv.imgproc.Imgproc
+import org.json.JSONArray
+import org.json.JSONObject
 
 /** Perspective correction and conservative geometry-based curved-page flattening. */
 object OpenCvPageCorrector {
@@ -58,7 +60,12 @@ object OpenCvPageCorrector {
             output = when (correctionType) {
                 "perspective" -> {
                     val corners = parseAndValidateCorners(cornerValues, source.size())
-                    applyPerspective(source, corners)
+                    applyPerspective(
+                        source,
+                        corners,
+                        sourceImagePath,
+                        qualityDiagnosticsEnabled,
+                    )
                 }
                 "curved" -> {
                     val flattened = flattenCurvedPage(
@@ -203,7 +210,12 @@ object OpenCvPageCorrector {
         }
     }
 
-    private fun applyPerspective(source: Mat, corners: Array<Point>): Mat {
+    private fun applyPerspective(
+        source: Mat,
+        corners: Array<Point>,
+        sourceImagePath: String,
+        debugArtifactsEnabled: Boolean,
+    ): Mat {
         val topWidth = distance(corners[0], corners[1])
         val bottomWidth = distance(corners[3], corners[2])
         val leftHeight = distance(corners[0], corners[3])
@@ -226,26 +238,192 @@ object OpenCvPageCorrector {
                 Point(0.0, (outputHeight - 1).toDouble()),
             )
         val transform = Imgproc.getPerspectiveTransform(sourcePoints, destinationPoints)
-        val corrected = Mat()
         try {
-            Imgproc.warpPerspective(
+            val outputSize = Size(outputWidth.toDouble(), outputHeight.toDouble())
+            val productionWarp = warpPerspectiveWithTiming(
                 source,
-                corrected,
                 transform,
-                Size(outputWidth.toDouble(), outputHeight.toDouble()),
-                // Linear interpolation avoids the wider cubic kernel that can
-                // soften small glyphs during a full-resolution document warp.
-                Imgproc.INTER_LINEAR,
-                Core.BORDER_REPLICATE,
-                Scalar.all(255.0),
+                Imgproc.INTER_CUBIC,
+                outputSize,
             )
-            return corrected
+            if (debugArtifactsEnabled) {
+                writePerspectiveInterpolationComparison(
+                    source = source,
+                    sourceImagePath = sourceImagePath,
+                    corners = corners,
+                    transform = transform,
+                    outputSize = outputSize,
+                    productionWarp = productionWarp,
+                )
+            }
+            return productionWarp.image
         } finally {
             transform.release()
             destinationPoints.release()
             sourcePoints.release()
         }
     }
+
+    private fun warpPerspectiveWithTiming(
+        source: Mat,
+        transform: Mat,
+        interpolation: Int,
+        outputSize: Size,
+    ): TimedPerspectiveWarp {
+        val output = Mat()
+        val startedAt = System.nanoTime()
+        try {
+            Imgproc.warpPerspective(
+                source,
+                output,
+                transform,
+                outputSize,
+                interpolation,
+                Core.BORDER_REPLICATE,
+                Scalar.all(255.0),
+            )
+            return TimedPerspectiveWarp(
+                image = output,
+                milliseconds = (System.nanoTime() - startedAt) / 1_000_000.0,
+            )
+        } catch (error: Throwable) {
+            output.release()
+            throw error
+        }
+    }
+
+    /**
+     * Writes DEBUG-only resampling comparisons without changing the production
+     * corrected path. Every variant shares the exact production source,
+     * corners, transform, output canvas, and border policy.
+     */
+    private fun writePerspectiveInterpolationComparison(
+        source: Mat,
+        sourceImagePath: String,
+        corners: Array<Point>,
+        transform: Mat,
+        outputSize: Size,
+        productionWarp: TimedPerspectiveWarp,
+    ) {
+        runCatching {
+            val sourceFile = File(sourceImagePath)
+            val comparisonDirectory = File(
+                sourceFile.parentFile,
+                "debug_quality/${sourceFile.nameWithoutExtension}/interpolation_compare",
+            ).apply { mkdirs() }
+            check(comparisonDirectory.isDirectory) {
+                "Perspective interpolation comparison directory could not be created."
+            }
+
+            val cubicMetrics = writePerspectiveComparisonVariant(
+                comparisonDirectory,
+                "perspective_cubic.png",
+                productionWarp.image,
+                "cubic",
+            )
+
+            val linearWarp = warpPerspectiveWithTiming(
+                source,
+                transform,
+                Imgproc.INTER_LINEAR,
+                outputSize,
+            )
+            val linearMetrics = try {
+                writePerspectiveComparisonVariant(
+                    comparisonDirectory,
+                    "perspective_linear.png",
+                    linearWarp.image,
+                    "linear",
+                )
+            } finally {
+                linearWarp.image.release()
+            }
+
+            val lanczos4Warp = warpPerspectiveWithTiming(
+                source,
+                transform,
+                Imgproc.INTER_LANCZOS4,
+                outputSize,
+            )
+            val lanczos4Metrics = try {
+                writePerspectiveComparisonVariant(
+                    comparisonDirectory,
+                    "perspective_lanczos4.png",
+                    lanczos4Warp.image,
+                    "lanczos4",
+                )
+            } finally {
+                lanczos4Warp.image.release()
+            }
+
+            val report = JSONObject()
+                .put("productionInterpolation", "INTER_CUBIC")
+                .put("sourceFile", sourceFile.name)
+                .put("outputWidth", outputSize.width.roundToInt())
+                .put("outputHeight", outputSize.height.roundToInt())
+                .put("borderMode", "BORDER_REPLICATE")
+                .put("borderValue", 255)
+                .put("corners", cornersJson(corners))
+                .put("perspectiveMatrix", matrixJson(transform))
+                .put("linearMs", linearWarp.milliseconds)
+                .put("cubicMs", productionWarp.milliseconds)
+                .put("lanczos4Ms", lanczos4Warp.milliseconds)
+                .put("linearLaplacianVariance", linearMetrics["linearSharpness"])
+                .put("cubicLaplacianVariance", cubicMetrics["cubicSharpness"])
+                .put(
+                    "lanczos4LaplacianVariance",
+                    lanczos4Metrics["lanczos4Sharpness"],
+                )
+                .put(
+                    "linearForegroundLaplacianVariance",
+                    linearMetrics["linearForegroundSharpness"],
+                )
+                .put(
+                    "cubicForegroundLaplacianVariance",
+                    cubicMetrics["cubicForegroundSharpness"],
+                )
+                .put(
+                    "lanczos4ForegroundLaplacianVariance",
+                    lanczos4Metrics["lanczos4ForegroundSharpness"],
+                )
+            File(comparisonDirectory, "interpolation_report.json").writeText(
+                report.toString(2),
+            )
+        }
+    }
+
+    private fun writePerspectiveComparisonVariant(
+        directory: File,
+        fileName: String,
+        image: Mat,
+        metricPrefix: String,
+    ): Map<String, Any> {
+        check(OpenCvImageQuality.write(File(directory, fileName).path, image)) {
+            "Perspective interpolation comparison could not be written."
+        }
+        return OpenCvImageQuality.metrics(image, metricPrefix)
+    }
+
+    private fun cornersJson(corners: Array<Point>): JSONArray = JSONArray().apply {
+        corners.forEach { point ->
+            put(JSONObject().put("x", point.x).put("y", point.y))
+        }
+    }
+
+    private fun matrixJson(matrix: Mat): JSONArray = JSONArray().apply {
+        for (row in 0 until matrix.rows()) {
+            val values = JSONArray()
+            for (column in 0 until matrix.cols()) {
+                values.put(matrix.get(row, column).firstOrNull() ?: 0.0)
+            }
+            put(values)
+        }
+    }
+
+    private data class TimedPerspectiveWarp(
+        val image: Mat,
+        val milliseconds: Double,
+    )
 
     private fun flattenCurvedPage(
         perspective: Mat,
