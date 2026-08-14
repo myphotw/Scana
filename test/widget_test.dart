@@ -100,6 +100,39 @@ void main() {
     expect(PdfSelectionGalleryLayout.columnCount(900), 4);
   });
 
+  test(
+    'page preview contain sizing preserves portrait and landscape documents',
+    () {
+      final portrait = applyBoxFit(
+        BoxFit.contain,
+        const Size(1000, 1500),
+        const Size(1600, 1200),
+      );
+      final landscape = applyBoxFit(
+        BoxFit.contain,
+        const Size(1500, 1000),
+        const Size(1600, 1200),
+      );
+
+      expect(portrait.destination, const Size(800, 1200));
+      expect(landscape.destination, const Size(1600, 1066.6666666666667));
+    },
+  );
+
+  testWidgets('viewer preview fills the phone body without action overlap', (
+    tester,
+  ) async {
+    await _expectViewerPreviewUsesAvailableArea(tester, const Size(390, 844));
+  });
+
+  testWidgets('viewer preview fills the portrait tablet body', (tester) async {
+    await _expectViewerPreviewUsesAvailableArea(tester, const Size(1600, 2560));
+  });
+
+  testWidgets('viewer preview fills the landscape tablet body', (tester) async {
+    await _expectViewerPreviewUsesAvailableArea(tester, const Size(2560, 1600));
+  });
+
   testWidgets('gallery actions stay below the scan thumbnail', (tester) async {
     final manager = _viewerManagerWithPages(1);
     addTearDown(manager.close);
@@ -1137,6 +1170,43 @@ void main() {
     expect(find.text('none'), findsOneWidget);
     expect(find.byKey(const ValueKey('curvature-report-raw')), findsOneWidget);
   });
+}
+
+Future<void> _expectViewerPreviewUsesAvailableArea(
+  WidgetTester tester,
+  Size screenSize,
+) async {
+  tester.view.physicalSize = screenSize;
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+  final manager = _viewerManagerWithPages(1);
+  addTearDown(manager.close);
+
+  await tester.pumpWidget(
+    MaterialApp(home: ScanResultViewerPage(sessionManager: manager)),
+  );
+  await tester.pumpAndSettle();
+
+  final preview = tester.getRect(
+    find.byKey(const ValueKey('viewer-page-preview-area-1')),
+  );
+  final imageFinder = find.descendant(
+    of: find.byKey(const ValueKey('viewer-page-preview-area-1')),
+    matching: find.byType(Image),
+  );
+  final image = tester.widget<Image>(imageFinder);
+  final imageRect = tester.getRect(imageFinder);
+  final actions = tester.getRect(
+    find.byKey(const ValueKey('viewer-retake-button')),
+  );
+
+  expect(preview.width, closeTo(screenSize.width, 0.1));
+  expect(preview.bottom, lessThanOrEqualTo(actions.top));
+  expect(imageRect.size, preview.size);
+  expect(image.fit, BoxFit.contain);
+  expect(image.image, isA<FileImage>());
+  expect(tester.takeException(), isNull);
 }
 
 ScanSessionManager _viewerManagerWithPages(int count) {

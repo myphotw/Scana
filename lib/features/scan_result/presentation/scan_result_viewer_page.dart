@@ -313,8 +313,9 @@ class _ScanResultImage extends StatelessWidget {
   Widget build(BuildContext context) {
     final imagePath = page.displayImagePath;
     return ColoredBox(
+      key: ValueKey('viewer-page-preview-area-${page.pageNo}'),
       color: Colors.black,
-      child: Center(
+      child: SizedBox.expand(
         child: Transform.rotate(
           key: ValueKey('viewer-page-rotation-${page.pageNo}'),
           angle: page.rotation * math.pi / 180,
