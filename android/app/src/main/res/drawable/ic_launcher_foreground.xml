@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Document: deliberately inside the adaptive-icon safe zone. -->
+    <path android:fillColor="#F8FAFC" android:pathData="M33,24 L67,24 L78,35 L78,84 Q78,88 74,88 L34,88 Q30,88 30,84 L30,28 Q30,24 33,24 Z" />
+    <path android:fillColor="#D8E3EF" android:pathData="M67,24 L67,35 L78,35 Z" />
+    <path android:fillColor="#4B6580" android:pathData="M40,46 L68,46 L68,50 L40,50 Z M40,57 L68,57 L68,61 L40,61 Z M40,68 L61,68 L61,72 L40,72 Z" />
+    <!-- Four corner marks make the document-scanning purpose legible at small sizes. -->
+    <path android:strokeColor="#34D399" android:strokeWidth="4" android:strokeLineCap="square" android:strokeLineJoin="miter" android:fillColor="@android:color/transparent" android:pathData="M25,39 L25,28 L36,28 M72,28 L83,28 L83,39 M83,73 L83,84 L72,84 M36,84 L25,84 L25,73" />
+</vector>

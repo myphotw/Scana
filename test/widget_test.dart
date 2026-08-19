@@ -899,11 +899,10 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('viewer-rotate-button')));
       await tester.pumpAndSettle();
       expect(manager.currentSession!.pages.first.rotation, 90);
-      final viewerRotation = tester.widget<Transform>(
+      final viewerRotation = tester.widget<RotatedBox>(
         find.byKey(const ValueKey('viewer-page-rotation-1')),
       );
-      expect(viewerRotation.transform.storage[0], closeTo(0, 0.0001));
-      expect(viewerRotation.transform.storage[1], closeTo(1, 0.0001));
+      expect(viewerRotation.quarterTurns, 1);
 
       await tester.pumpWidget(
         MaterialApp(home: PageManagementPage(sessionManager: manager)),

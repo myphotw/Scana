@@ -98,17 +98,18 @@ void main() {
       'android/app/src/main/kotlin/com/myphotw/scana/imageprocessing/'
       'OpenCvPageCorrector.kt',
     ).readAsStringSync();
-    final productionStart = source.indexOf('private fun applyPerspective(');
-    final helperStart = source.indexOf(
+    final normalized = source.replaceAll('\r\n', '\n');
+    final productionStart = normalized.indexOf('private fun applyPerspective(');
+    final helperStart = normalized.indexOf(
       'private fun warpPerspectiveWithTiming(',
     );
-    final production = source.substring(productionStart, helperStart);
+    final production = normalized.substring(productionStart, helperStart);
 
     expect(production, contains('Imgproc.INTER_CUBIC'));
     expect(production, isNot(contains('Imgproc.INTER_LINEAR')));
     expect(production, isNot(contains('Imgproc.INTER_LANCZOS4')));
     expect(
-      source,
+      normalized,
       contains(
         'warpPerspectiveWithTiming(\n'
         '                source,\n'
@@ -116,8 +117,8 @@ void main() {
         '                Imgproc.INTER_CUBIC,',
       ),
     );
-    expect(source, contains('Core.BORDER_REPLICATE'));
-    expect(source, contains('Scalar.all(255.0)'));
+    expect(normalized, contains('Core.BORDER_REPLICATE'));
+    expect(normalized, contains('Scalar.all(255.0)'));
   });
 
   test('DEBUG Perspective comparison keeps all interpolation variants', () {

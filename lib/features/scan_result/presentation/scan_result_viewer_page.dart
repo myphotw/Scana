@@ -1,7 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 
 import 'package:scana/features/camera/presentation/camera_preview_page.dart';
@@ -316,9 +314,9 @@ class _ScanResultImage extends StatelessWidget {
       key: ValueKey('viewer-page-preview-area-${page.pageNo}'),
       color: Colors.black,
       child: SizedBox.expand(
-        child: Transform.rotate(
+        child: RotatedBox(
           key: ValueKey('viewer-page-rotation-${page.pageNo}'),
-          angle: page.rotation * math.pi / 180,
+          quarterTurns: ScanResultPreviewLayout.quarterTurnsFor(page.rotation),
           child: Image.file(
             File(imagePath),
             fit: BoxFit.contain,
@@ -338,5 +336,35 @@ class _ScanResultImage extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+/// Keeps 90-degree page rotation in Flutter's layout phase. This lets
+/// [Image] calculate BoxFit.contain against swapped constraints on tablets.
+class ScanResultPreviewLayout {
+  const ScanResultPreviewLayout._();
+
+  static int quarterTurnsFor(int rotation) => (rotation ~/ 90) % 4;
+
+  static Size imageLayoutSize(Size availableBody, int rotation) {
+    final quarterTurns = quarterTurnsFor(rotation);
+    return quarterTurns.isOdd
+        ? Size(availableBody.height, availableBody.width)
+        : availableBody;
+  }
+
+  static Size containedRenderedSize({
+    required Size imageSize,
+    required Size availableBody,
+    required int rotation,
+  }) {
+    final fitted = applyBoxFit(
+      BoxFit.contain,
+      imageSize,
+      imageLayoutSize(availableBody, rotation),
+    ).destination;
+    return quarterTurnsFor(rotation).isOdd
+        ? Size(fitted.height, fitted.width)
+        : fitted;
   }
 }
