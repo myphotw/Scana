@@ -10,6 +10,7 @@ import 'package:scana/app.dart';
 import 'package:scana/features/page_editor/presentation/page_editor_page.dart';
 import 'package:scana/features/page_editor/presentation/quick_corner_edit_page.dart';
 import 'package:scana/features/camera/presentation/camera_preview_page.dart';
+import 'package:scana/features/home/presentation/scan_home_page.dart';
 import 'package:scana/features/scan_result/presentation/scan_result_viewer_page.dart';
 import 'package:scana/features/scan_result/presentation/page_management_page.dart';
 import 'package:scana/features/scan_result/presentation/pdf_page_review_page.dart';
@@ -25,11 +26,18 @@ import 'package:scana/services/storage/scan_session_storage.dart';
 import 'package:scana/services/orientation/screen_orientation_controller.dart';
 
 void main() {
-  testWidgets('creates the Scana camera entry screen', (tester) async {
+  testWidgets('creates the ML Kit production scan entry screen', (
+    tester,
+  ) async {
     await tester.pumpWidget(const ScanaApp());
 
     expect(find.byType(ScanaApp), findsOneWidget);
-    expect(find.text('카메라를 준비하는 중입니다.'), findsOneWidget);
+    expect(find.byType(ScanHomePage), findsOneWidget);
+    expect(find.text('스캔 시작'), findsOneWidget);
+    expect(find.text('1면 스캔'), findsNothing);
+    expect(find.text('2면 스캔'), findsNothing);
+    expect(find.byKey(const Key('startMlKitScanButton')), findsOneWidget);
+    expect(find.byKey(const Key('openLegacyScannerButton')), findsOneWidget);
   });
 
   testWidgets('renders the two-page manual center guide', (tester) async {
@@ -630,7 +638,7 @@ void main() {
 
     expect(manager.currentSession?.id, 'empty-recovered-session');
     expect(find.byKey(const ValueKey('scan-result-page-view')), findsNothing);
-    expect(find.text('카메라를 준비하는 중입니다.'), findsOneWidget);
+    expect(find.text('문서와 책을 자동으로 구분합니다'), findsOneWidget);
   });
 
   testWidgets('last page deletion from management returns to camera route', (
@@ -730,7 +738,7 @@ void main() {
     await tester.tap(find.byTooltip('Back'));
     await tester.pumpAndSettle();
     expect(manager.currentSession?.id, 'recovered-session');
-    expect(find.text('카메라를 준비하는 중입니다.'), findsOneWidget);
+    expect(find.text('문서와 책을 자동으로 구분합니다'), findsOneWidget);
   });
 
   testWidgets('recovery deletion returns to a new camera state', (
@@ -763,7 +771,7 @@ void main() {
 
     expect(manager.currentSession, isNull);
     expect(find.byKey(const Key('pdfSelectionGallery')), findsNothing);
-    expect(find.text('카메라를 준비하는 중입니다.'), findsOneWidget);
+    expect(find.text('문서와 책을 자동으로 구분합니다'), findsOneWidget);
   });
 
   testWidgets('Viewer and Gallery prefer the completed enhanced image', (

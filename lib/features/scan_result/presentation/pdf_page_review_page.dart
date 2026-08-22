@@ -7,9 +7,11 @@ import 'package:flutter/material.dart';
 
 import 'package:scana/features/scan_session/application/scan_session_manager.dart';
 import 'package:scana/features/page_editor/presentation/quick_corner_edit_page.dart';
+import 'package:scana/features/page_editor/presentation/mlkit_page_edit_page.dart';
 import 'package:scana/models/scan_page.dart';
 import 'package:scana/services/diagnostics/debug_diagnostics.dart';
 import 'package:scana/services/ocr/ocr_service.dart';
+import 'package:scana/services/mlkit_document_scanner/mlkit_page_mutation_policy.dart';
 import 'package:scana/services/ocr/pdf_title_suggestion_service.dart';
 import 'package:scana/services/pdf_export/pdf_document_opener.dart';
 import 'package:scana/services/pdf_export/pdf_export_service.dart';
@@ -343,6 +345,30 @@ class _PdfPageReviewPageState extends State<PdfPageReviewPage>
       (page) => page.rawImagePath == rawImagePath,
     );
     if (sessionIndex < 0) return;
+    if (sessionPages[sessionIndex].isMlKitPage) {
+      final mutation = await Navigator.of(context).push<MlKitPageMutation>(
+        MaterialPageRoute<MlKitPageMutation>(
+          builder: (context) => MlKitPageEditPage(
+            sessionManager: widget.sessionManager,
+            pageIndex: sessionIndex,
+            orientationController: widget.orientationController,
+          ),
+        ),
+      );
+      if (!mounted || mutation == null) return;
+      setState(() {
+        _orderedPages = MlKitPageMutationPolicy.preserveOrder(
+          _orderedPages,
+          mutation,
+        );
+        _reorderRevision++;
+        _suggestedTitle = null;
+        _isAnalyzingTitle = true;
+        _titleAnalysisFailed = false;
+      });
+      unawaited(_analyzeSuggestedTitle());
+      return;
+    }
     final applied = await Navigator.of(context).push<bool>(
       MaterialPageRoute<bool>(
         builder: (context) => QuickCornerEditPage(
@@ -886,10 +912,19 @@ class _ReviewCard extends StatelessWidget {
                   icon: const Icon(Icons.zoom_out_map, size: 19),
                 ),
                 IconButton(
-                  key: ValueKey('pdf-review-quick-corner-${page.rawImagePath}'),
-                  tooltip: '모서리 수정',
+                  key: ValueKey(
+                    page.usesCustomImagePipeline
+                        ? 'pdf-review-quick-corner-${page.rawImagePath}'
+                        : 'pdf-review-mlkit-edit-${page.rawImagePath}',
+                  ),
+                  tooltip: page.usesCustomImagePipeline ? '모서리 수정' : '페이지 편집',
                   onPressed: onQuickEdit,
-                  icon: const Icon(Icons.crop_free, size: 19),
+                  icon: Icon(
+                    page.usesCustomImagePipeline
+                        ? Icons.crop_free
+                        : Icons.edit_outlined,
+                    size: 19,
+                  ),
                 ),
                 IconButton(
                   tooltip: '페이지 삭제',

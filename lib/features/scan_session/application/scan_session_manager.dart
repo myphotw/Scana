@@ -3,10 +3,12 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:image/image.dart' as image;
 import 'package:path/path.dart' as path;
 import 'package:uuid/uuid.dart';
 
 import 'package:scana/models/scan_page.dart';
+import 'package:scana/models/mlkit_page_edit_metadata.dart';
 import 'package:scana/models/scan_session.dart';
 import 'package:scana/models/document_detection_result.dart';
 import 'package:scana/models/page_correction.dart';
@@ -28,9 +30,58 @@ import 'package:scana/services/image_processing/capture_guide_policy.dart';
 import 'package:scana/services/storage/scan_session_storage.dart';
 import 'package:scana/services/diagnostics/debug_diagnostics.dart';
 import 'package:scana/services/diagnostics/scan_quality_diagnostics.dart';
+import 'package:scana/services/mlkit_document_scanner/mlkit_document_scanner.dart';
+import 'package:scana/services/mlkit_document_scanner/mlkit_page_raster_editor.dart';
+import 'package:scana/services/mlkit_document_scanner/mlkit_spread_analyzer.dart';
+import 'package:scana/services/mlkit_document_scanner/mlkit_spread_splitter.dart';
 
 typedef SessionIdGenerator = String Function();
 typedef Clock = DateTime Function();
+
+class MlKitScanTarget {
+  const MlKitScanTarget({
+    required this.sessionId,
+    required this.startPageNo,
+    required this.createdSession,
+  });
+
+  final String sessionId;
+  final int startPageNo;
+  final bool createdSession;
+}
+
+class MlKitPageImport {
+  const MlKitPageImport({
+    required this.scannedPage,
+    required this.sourceType,
+    required this.layout,
+    required this.originalSourcePath,
+    this.parentSpreadId,
+    this.spreadSide,
+    this.splitX,
+    this.splitConfidence,
+    this.splitFallbackUsed = false,
+    this.cropRect = MlKitCropRect.full,
+  });
+
+  final MlKitScannedPage scannedPage;
+  final ScanPageSourceType sourceType;
+  final MlKitPageLayout layout;
+  final String originalSourcePath;
+  final String? parentSpreadId;
+  final MlKitSpreadSide? spreadSide;
+  final int? splitX;
+  final double? splitConfidence;
+  final bool splitFallbackUsed;
+  final MlKitCropRect cropRect;
+}
+
+class MlKitPageMutation {
+  const MlKitPageMutation({required this.oldRawPaths, required this.pages});
+
+  final List<String> oldRawPaths;
+  final List<ScanPage> pages;
+}
 
 /// Cleanup contract shared by cancel and the future successful-export flow.
 abstract interface class ScanSessionCleanup {
@@ -51,6 +102,12 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
     SpreadFallbackCropper spreadFallbackCropper =
         const OpenCvSpreadFallbackCropper(),
     AiDocumentSegmenter? aiDocumentSegmenter,
+    MlKitSpreadAnalyzer mlKitSpreadAnalyzer =
+        const ConservativeMlKitSpreadAnalyzer(),
+    MlKitSpreadSplitter mlKitSpreadSplitter =
+        const LosslessMlKitSpreadSplitter(),
+    MlKitPageRasterEditor mlKitPageRasterEditor =
+        const LosslessMlKitPageRasterEditor(),
     SessionIdGenerator sessionIdGenerator = _newUuid,
     Clock clock = DateTime.now,
   }) {
@@ -62,6 +119,9 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
       spreadCaptureSplitter: spreadCaptureSplitter,
       spreadFallbackCropper: spreadFallbackCropper,
       aiDocumentSegmenter: aiDocumentSegmenter,
+      mlKitSpreadAnalyzer: mlKitSpreadAnalyzer,
+      mlKitSpreadSplitter: mlKitSpreadSplitter,
+      mlKitPageRasterEditor: mlKitPageRasterEditor,
       sessionIdGenerator: sessionIdGenerator,
       clock: clock,
     );
@@ -75,6 +135,9 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
     required this._spreadCaptureSplitter,
     required this._spreadFallbackCropper,
     required this._aiDocumentSegmenter,
+    required this._mlKitSpreadAnalyzer,
+    required this._mlKitSpreadSplitter,
+    required this._mlKitPageRasterEditor,
     required this._sessionIdGenerator,
     required this._clock,
   }) {
@@ -88,6 +151,9 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
   final SpreadCaptureSplitter _spreadCaptureSplitter;
   final SpreadFallbackCropper _spreadFallbackCropper;
   final AiDocumentSegmenter? _aiDocumentSegmenter;
+  final MlKitSpreadAnalyzer _mlKitSpreadAnalyzer;
+  final MlKitSpreadSplitter _mlKitSpreadSplitter;
+  final MlKitPageRasterEditor _mlKitPageRasterEditor;
   final SessionIdGenerator _sessionIdGenerator;
   final Clock _clock;
 
@@ -112,6 +178,100 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
       await _storage.saveSession(session);
     }
     notifyListeners();
+  }
+
+  Future<MlKitScanTarget> prepareMlKitScan() async {
+    _ensureOpen();
+    final createdSession = _currentSession == null;
+    final session = await _ensureSession();
+    return MlKitScanTarget(
+      sessionId: session.id,
+      startPageNo: session.pages.length + 1,
+      createdSession: createdSession,
+    );
+  }
+
+  Future<List<ScanPage>> registerMlKitPages(
+    List<MlKitScannedPage> scannedPages, {
+    ScanPageSourceType sourceType = ScanPageSourceType.mlKit,
+  }) => registerMlKitImports(
+    scannedPages
+        .map(
+          (page) => MlKitPageImport(
+            scannedPage: page,
+            sourceType: sourceType,
+            layout: sourceType == ScanPageSourceType.mlKitSpread
+                ? MlKitPageLayout.spread
+                : MlKitPageLayout.single,
+            originalSourcePath: page.filePath,
+          ),
+        )
+        .toList(growable: false),
+  );
+
+  Future<List<ScanPage>> registerMlKitImports(
+    List<MlKitPageImport> imports,
+  ) async {
+    _ensureOpen();
+    if (imports.isEmpty) return const [];
+    final session = _requireSession();
+    for (final pageImport in imports) {
+      final page = pageImport.scannedPage;
+      final file = File(page.filePath);
+      if (!await file.exists() || await file.length() != page.byteCount) {
+        throw const FileSystemException(
+          'An ML Kit scan image is missing or incomplete.',
+        );
+      }
+      if (!await File(pageImport.originalSourcePath).exists()) {
+        throw const FileSystemException(
+          'The editable ML Kit source is missing.',
+        );
+      }
+    }
+    final imported = <ScanPage>[];
+    for (final pageImport in imports) {
+      final scannedPage = pageImport.scannedPage;
+      final page = ScanPage(
+        pageNo: session.pages.length + 1,
+        rawImagePath: scannedPage.filePath,
+        createdTime: _clock(),
+        sourceType: pageImport.sourceType,
+        mlKitLayout: pageImport.layout,
+        originalSourcePath: pageImport.originalSourcePath,
+        parentSpreadId: pageImport.parentSpreadId,
+        spreadSide: pageImport.spreadSide,
+        splitX: pageImport.splitX,
+        splitConfidence: pageImport.splitConfidence,
+        splitFallbackUsed: pageImport.splitFallbackUsed,
+        mlKitCropRect: pageImport.cropRect,
+        documentSourceWidth: scannedPage.width,
+        documentSourceHeight: scannedPage.height,
+      );
+      session.addPage(page);
+      imported.add(page);
+      DebugDiagnostics.instance.log(
+        'MLKIT_SCAN',
+        'registered pageNo=${page.pageNo} bytes=${scannedPage.byteCount} '
+            'size=${scannedPage.width}x${scannedPage.height}',
+      );
+    }
+    await _storage.saveSession(session);
+    notifyListeners();
+    return List.unmodifiable(imported);
+  }
+
+  Future<void> discardEmptyMlKitTarget(MlKitScanTarget target) async {
+    if (!target.createdSession) return;
+    final session = _currentSession;
+    if (session == null ||
+        session.id != target.sessionId ||
+        session.pages.isNotEmpty) {
+      return;
+    }
+    await _storage.deleteSession(session.id);
+    _currentSession = null;
+    if (!_isClosed) notifyListeners();
   }
 
   Future<List<ScanSession>> findRecoverableSessions() {
@@ -546,13 +706,220 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
     }
   }
 
+  Future<MlKitSpreadAnalysis> analyzeMlKitPageAt(int index) async {
+    _ensureOpen();
+    final page = _requireSession().pages[index];
+    if (!page.isMlKitPage) {
+      throw StateError('Only ML Kit pages support spread analysis.');
+    }
+    return _mlKitSpreadAnalyzer.analyze(await _mlKitSourceDescriptor(page));
+  }
+
+  Future<MlKitPageMutation> cropMlKitPageAt(
+    int index,
+    MlKitCropRect previewCrop,
+  ) async {
+    _ensureOpen();
+    final session = _requireSession();
+    final previous = session.pages[index];
+    if (!previous.isMlKitPage) {
+      throw StateError('Only ML Kit pages support lossless crop editing.');
+    }
+    final unrotated = MlKitCropRect.unrotate(previewCrop, previous.rotation);
+    final absolute = (previous.mlKitCropRect ?? MlKitCropRect.full).compose(
+      unrotated,
+    );
+    final raster = await _mlKitPageRasterEditor.render(
+      page: previous,
+      cropRect: absolute,
+    );
+    final updated = previous.copyWith(
+      mlKitCropRect: raster.cropRect,
+      editedImagePath: raster.page.filePath,
+      documentSourceWidth: raster.page.width,
+      documentSourceHeight: raster.page.height,
+    );
+    session.replacePageAt(index, updated);
+    await _storage.saveSession(session);
+    await _deleteUnreferencedMlKitFiles([previous], session.pages);
+    notifyListeners();
+    return MlKitPageMutation(
+      oldRawPaths: [previous.rawImagePath],
+      pages: [session.pages[index]],
+    );
+  }
+
+  Future<MlKitPageMutation> rotateMlKitPageAt(int index) async {
+    _ensureOpen();
+    final session = _requireSession();
+    final previous = session.pages[index];
+    if (!previous.isMlKitPage) {
+      throw StateError('Only ML Kit pages use the lossless edit rotation.');
+    }
+    final raster = await _mlKitPageRasterEditor.render(
+      page: previous,
+      cropRect: previous.mlKitCropRect ?? MlKitCropRect.full,
+    );
+    final updated = previous.copyWith(
+      rotation: (previous.rotation + 90) % 360,
+      mlKitCropRect: raster.cropRect,
+      editedImagePath: raster.page.filePath,
+      documentSourceWidth: raster.page.width,
+      documentSourceHeight: raster.page.height,
+    );
+    session.replacePageAt(index, updated);
+    await _storage.saveSession(session);
+    await _deleteUnreferencedMlKitFiles([previous], session.pages);
+    notifyListeners();
+    return MlKitPageMutation(
+      oldRawPaths: [previous.rawImagePath],
+      pages: [session.pages[index]],
+    );
+  }
+
+  Future<MlKitPageMutation> splitMlKitPageAt(
+    int index, {
+    required int splitX,
+    required double confidence,
+    required bool fallbackUsed,
+  }) async {
+    _ensureOpen();
+    final session = _requireSession();
+    final previous = session.pages[index];
+    if (!previous.isMlKitPage || previous.isMlKitSpreadChild) {
+      throw StateError('The page cannot be converted to a spread.');
+    }
+    final source = await _mlKitSourceDescriptor(previous);
+    final groupId = 'spread_${const Uuid().v4().replaceAll('-', '')}';
+    final split = await _mlKitSpreadSplitter.split(
+      sessionId: session.id,
+      leftPageNo: previous.pageNo,
+      source: source,
+      detection: MlKitSpineDetection(
+        splitX: splitX,
+        confidence: confidence,
+        usedFallback: fallbackUsed,
+      ),
+      outputStem: groupId,
+    );
+    final children = _spreadChildren(
+      previous: previous,
+      split: split,
+      parentSpreadId: groupId,
+    );
+    session.replacePageRange(index, 1, children);
+    await _storage.saveSession(session);
+    await _deleteUnreferencedMlKitFiles([previous], session.pages);
+    notifyListeners();
+    return MlKitPageMutation(
+      oldRawPaths: [previous.rawImagePath],
+      pages: session.pages
+          .where((page) => page.parentSpreadId == groupId)
+          .toList(growable: false),
+    );
+  }
+
+  Future<MlKitPageMutation> adjustMlKitSpreadAt(int index, int splitX) async {
+    _ensureOpen();
+    final session = _requireSession();
+    final selected = session.pages[index];
+    final groupId = selected.parentSpreadId;
+    if (!selected.isMlKitSpreadChild || groupId == null) {
+      throw StateError('The page is not an editable spread child.');
+    }
+    final previous = session.pages
+        .where((page) => page.parentSpreadId == groupId)
+        .toList(growable: false);
+    final oldPaths = previous.map((page) => page.rawImagePath).toList();
+    final source = await _mlKitSourceDescriptor(selected);
+    final outputStem = 'spread_${const Uuid().v4().replaceAll('-', '')}';
+    final split = await _mlKitSpreadSplitter.split(
+      sessionId: session.id,
+      leftPageNo: previous.first.pageNo,
+      source: source,
+      detection: MlKitSpineDetection(
+        splitX: splitX,
+        confidence: selected.splitConfidence ?? 1,
+        usedFallback: false,
+      ),
+      outputStem: outputStem,
+    );
+    final children = _spreadChildren(
+      previous: selected,
+      split: split,
+      parentSpreadId: groupId,
+      leftRotation: previous
+          .where((page) => page.spreadSide == MlKitSpreadSide.left)
+          .firstOrNull
+          ?.rotation,
+      rightRotation: previous
+          .where((page) => page.spreadSide == MlKitSpreadSide.right)
+          .firstOrNull
+          ?.rotation,
+    );
+    session.replacePagesByRawPath(oldPaths.toSet(), children);
+    await _storage.saveSession(session);
+    await _deleteUnreferencedMlKitFiles(previous, session.pages);
+    notifyListeners();
+    return MlKitPageMutation(
+      oldRawPaths: oldPaths,
+      pages: session.pages
+          .where((page) => page.parentSpreadId == groupId)
+          .toList(growable: false),
+    );
+  }
+
+  Future<MlKitPageMutation> restoreMlKitSpreadAt(int index) async {
+    _ensureOpen();
+    final session = _requireSession();
+    final selected = session.pages[index];
+    final groupId = selected.parentSpreadId;
+    if (!selected.isMlKitSpreadChild || groupId == null) {
+      throw StateError('The page is not an editable spread child.');
+    }
+    final previous = session.pages
+        .where((page) => page.parentSpreadId == groupId)
+        .toList(growable: false);
+    final oldPaths = previous.map((page) => page.rawImagePath).toList();
+    final source = await _mlKitSourceDescriptor(selected);
+    final restored = ScanPage(
+      pageNo: previous.map((page) => page.pageNo).reduce(math.min),
+      rawImagePath: source.filePath,
+      createdTime: previous.first.createdTime,
+      sourceType: ScanPageSourceType.mlKit,
+      mlKitLayout: MlKitPageLayout.single,
+      originalSourcePath: source.filePath,
+      splitX: selected.splitX,
+      splitConfidence: selected.splitConfidence,
+      splitFallbackUsed: selected.splitFallbackUsed,
+      mlKitCropRect: MlKitCropRect.full,
+      rotation: previous.first.rotation,
+      documentSourceWidth: source.width,
+      documentSourceHeight: source.height,
+    );
+    session.replacePagesByRawPath(oldPaths.toSet(), [restored]);
+    await _storage.saveSession(session);
+    await _deleteUnreferencedMlKitFiles(previous, session.pages);
+    notifyListeners();
+    final current = session.pages.firstWhere(
+      (page) => page.rawImagePath == source.filePath,
+    );
+    return MlKitPageMutation(oldRawPaths: oldPaths, pages: [current]);
+  }
+
   Future<void> deletePageAt(int index) async {
     _ensureOpen();
     final session = _requireSession();
     final page = session.pages[index];
-    await _storage.deletePageFiles(page);
-    session.removePageAt(index);
-    await _storage.saveSession(session);
+    if (page.isMlKitPage) {
+      session.removePageAt(index);
+      await _storage.saveSession(session);
+      await _deleteUnreferencedMlKitFiles([page], session.pages);
+    } else {
+      await _storage.deletePageFiles(page);
+      session.removePageAt(index);
+      await _storage.saveSession(session);
+    }
     notifyListeners();
   }
 
@@ -578,6 +945,13 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
   ) async {
     _ensureOpen();
     final session = _requireSession();
+    if (!session.pages[index].usesCustomImagePipeline) {
+      DebugDiagnostics.instance.log(
+        'MLKIT_SCAN',
+        'custom corners skipped pageNo=${session.pages[index].pageNo}',
+      );
+      return;
+    }
     session.updateDocumentCornersAt(index, corners);
     await _storage.saveSession(session);
     notifyListeners();
@@ -590,6 +964,7 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
     _ensureOpen();
     final session = _requireSession();
     final previousPage = session.pages[index];
+    if (!previousPage.usesCustomImagePipeline) return false;
     final stopwatch = Stopwatch()..start();
     await updateDocumentCornersAt(index, corners);
     final corrected = await _runAutomaticCorrectionPipelineAt(
@@ -614,7 +989,9 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
 
   Future<bool> detectPageAt(int index) async {
     _ensureOpen();
-    return _detectPage(_requireSession(), index);
+    final session = _requireSession();
+    if (!session.pages[index].usesCustomImagePipeline) return false;
+    return _detectPage(session, index);
   }
 
   Future<bool> _runAutomaticCorrectionPipelineAt(
@@ -915,6 +1292,13 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
     _ensureOpen();
     final session = _requireSession();
     final page = session.pages[index];
+    if (!page.usesCustomImagePipeline) {
+      DebugDiagnostics.instance.log(
+        'MLKIT_SCAN',
+        'custom correction skipped pageNo=${page.pageNo}',
+      );
+      return false;
+    }
     final corners = page.documentCorners;
     if (corners == null) {
       session.updateCorrectionAt(
@@ -1126,6 +1510,13 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
     _ensureOpen();
     final session = _requireSession();
     final page = session.pages[index];
+    if (!page.usesCustomImagePipeline) {
+      DebugDiagnostics.instance.log(
+        'MLKIT_SCAN',
+        'custom enhancement skipped pageNo=${page.pageNo}',
+      );
+      return false;
+    }
     session.updateEnhancementAt(
       index,
       mode: mode,
@@ -1619,6 +2010,94 @@ class ScanSessionManager extends ChangeNotifier implements ScanSessionCleanup {
             'mode=${mode.name} error=$error',
       );
       return page.withEnhancement(mode: mode, status: EnhancementStatus.failed);
+    }
+  }
+
+  Future<MlKitScannedPage> _mlKitSourceDescriptor(ScanPage page) async {
+    final sourcePath = page.editableSourcePath;
+    final file = File(sourcePath);
+    final bytes = await file.readAsBytes();
+    final decoded = image.decodeImage(bytes);
+    if (decoded == null) {
+      throw const FormatException(
+        'ML Kit editable source could not be decoded.',
+      );
+    }
+    return MlKitScannedPage(
+      filePath: sourcePath,
+      byteCount: bytes.length,
+      width: decoded.width,
+      height: decoded.height,
+    );
+  }
+
+  List<ScanPage> _spreadChildren({
+    required ScanPage previous,
+    required MlKitSpreadSplitResult split,
+    required String parentSpreadId,
+    int? leftRotation,
+    int? rightRotation,
+  }) => [
+    ScanPage(
+      pageNo: previous.pageNo,
+      rawImagePath: split.left.filePath,
+      createdTime: previous.createdTime,
+      sourceType: ScanPageSourceType.mlKitSpread,
+      mlKitLayout: MlKitPageLayout.spread,
+      originalSourcePath: previous.editableSourcePath,
+      parentSpreadId: parentSpreadId,
+      spreadSide: MlKitSpreadSide.left,
+      splitX: split.detection.splitX,
+      splitConfidence: split.detection.confidence,
+      splitFallbackUsed: split.detection.usedFallback,
+      mlKitCropRect: split.leftCropRect,
+      rotation: leftRotation ?? previous.rotation,
+      documentSourceWidth: split.left.width,
+      documentSourceHeight: split.left.height,
+    ),
+    ScanPage(
+      pageNo: previous.pageNo + 1,
+      rawImagePath: split.right.filePath,
+      createdTime: previous.createdTime,
+      sourceType: ScanPageSourceType.mlKitSpread,
+      mlKitLayout: MlKitPageLayout.spread,
+      originalSourcePath: previous.editableSourcePath,
+      parentSpreadId: parentSpreadId,
+      spreadSide: MlKitSpreadSide.right,
+      splitX: split.detection.splitX,
+      splitConfidence: split.detection.confidence,
+      splitFallbackUsed: split.detection.usedFallback,
+      mlKitCropRect: split.rightCropRect,
+      rotation: rightRotation ?? previous.rotation,
+      documentSourceWidth: split.right.width,
+      documentSourceHeight: split.right.height,
+    ),
+  ];
+
+  Future<void> _deleteUnreferencedMlKitFiles(
+    Iterable<ScanPage> removed,
+    Iterable<ScanPage> remaining,
+  ) async {
+    String normalized(String value) => path.normalize(value).toLowerCase();
+    final protected = <String>{
+      for (final page in remaining) normalized(page.rawImagePath),
+      for (final page in remaining)
+        if (page.originalSourcePath != null)
+          normalized(page.originalSourcePath!),
+      for (final page in remaining)
+        if (page.editedImagePath != null) normalized(page.editedImagePath!),
+    };
+    final candidates = <String>{
+      for (final page in removed) page.rawImagePath,
+      for (final page in removed)
+        if (page.originalSourcePath != null) page.originalSourcePath!,
+      for (final page in removed)
+        if (page.editedImagePath != null) page.editedImagePath!,
+    };
+    for (final candidate in candidates) {
+      if (protected.contains(normalized(candidate))) continue;
+      final file = File(candidate);
+      if (await file.exists()) await file.delete();
     }
   }
 

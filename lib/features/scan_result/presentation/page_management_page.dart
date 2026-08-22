@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:scana/features/scan_result/presentation/pdf_page_review_page.dart';
 import 'package:scana/features/scan_result/presentation/scan_result_viewer_page.dart';
 import 'package:scana/features/page_editor/presentation/quick_corner_edit_page.dart';
+import 'package:scana/features/page_editor/presentation/mlkit_page_edit_page.dart';
 import 'package:scana/features/scan_session/application/scan_session_manager.dart';
 import 'package:scana/models/scan_page.dart';
 import 'package:scana/models/page_correction.dart';
@@ -17,6 +18,7 @@ import 'package:scana/services/pdf_export/pdf_export_service.dart';
 import 'package:scana/services/pdf_export/pdf_saf_storage.dart';
 import 'package:scana/services/diagnostics/debug_diagnostics.dart';
 import 'package:scana/services/ocr/ocr_service.dart';
+import 'package:scana/services/mlkit_document_scanner/mlkit_page_mutation_policy.dart';
 import 'package:scana/services/pdf_export/pdf_document_opener.dart';
 import 'package:scana/services/orientation/screen_orientation_controller.dart';
 
@@ -122,6 +124,7 @@ class _PageManagementPageState extends State<PageManagementPage> {
                   selectedPaths: _selectedPaths,
                   onToggle: _toggleSelection,
                   onOpen: (page) => _openViewer(pages, page),
+                  onEditPage: _editMlKitPage,
                   onEditCorners: _quickEditCorners,
                   onDelete: (page) => _deletePage(pages.indexOf(page)),
                 ),
@@ -250,6 +253,34 @@ class _PageManagementPageState extends State<PageManagementPage> {
     if (!mounted) return;
   }
 
+  Future<void> _editMlKitPage(ScanPage page) async {
+    final pages = widget.sessionManager.currentSession?.pages ?? const [];
+    final index = pages.indexWhere(
+      (candidate) => candidate.rawImagePath == page.rawImagePath,
+    );
+    if (index < 0) return;
+    final selectedBefore = Set<String>.of(_selectedPaths);
+    final mutation = await Navigator.of(context).push<MlKitPageMutation>(
+      MaterialPageRoute<MlKitPageMutation>(
+        builder: (context) => MlKitPageEditPage(
+          sessionManager: widget.sessionManager,
+          pageIndex: index,
+          orientationController: widget.orientationController,
+        ),
+      ),
+    );
+    if (!mounted || mutation == null) return;
+    setState(() {
+      final updated = MlKitPageMutationPolicy.preserveSelection(
+        selectedBefore,
+        mutation,
+      );
+      _selectedPaths
+        ..clear()
+        ..addAll(updated);
+    });
+  }
+
   Future<void> _deletePage(int index) async {
     final pages = widget.sessionManager.currentSession?.pages ?? const [];
     if (index < 0 || index >= pages.length) return;
@@ -287,6 +318,7 @@ class _PdfSelectionGallery extends StatelessWidget {
     required this.selectedPaths,
     required this.onToggle,
     required this.onOpen,
+    required this.onEditPage,
     required this.onEditCorners,
     required this.onDelete,
   });
@@ -295,6 +327,7 @@ class _PdfSelectionGallery extends StatelessWidget {
   final Set<String> selectedPaths;
   final ValueChanged<ScanPage> onToggle;
   final ValueChanged<ScanPage> onOpen;
+  final ValueChanged<ScanPage> onEditPage;
   final ValueChanged<ScanPage> onEditCorners;
   final ValueChanged<ScanPage> onDelete;
 
@@ -322,6 +355,7 @@ class _PdfSelectionGallery extends StatelessWidget {
             onTap: () => onToggle(page),
             onLongPress: () => onOpen(page),
             onPreview: () => onOpen(page),
+            onEditPage: () => onEditPage(page),
             onEditCorners: () => onEditCorners(page),
             onDelete: () => onDelete(page),
           );
@@ -340,6 +374,7 @@ class _GalleryPageCard extends StatelessWidget {
     required this.onTap,
     required this.onLongPress,
     required this.onPreview,
+    required this.onEditPage,
     required this.onEditCorners,
     required this.onDelete,
   });
@@ -349,6 +384,7 @@ class _GalleryPageCard extends StatelessWidget {
   final VoidCallback onTap;
   final VoidCallback onLongPress;
   final VoidCallback onPreview;
+  final VoidCallback onEditPage;
   final VoidCallback onEditCorners;
   final VoidCallback onDelete;
 
@@ -424,15 +460,26 @@ class _GalleryPageCard extends StatelessWidget {
                       icon: Icons.zoom_out_map,
                       compact: compact,
                     ),
-                    _GalleryActionButton(
-                      key: ValueKey(
-                        'gallery-quick-corner-${page.rawImagePath}',
+                    if (page.usesCustomImagePipeline)
+                      _GalleryActionButton(
+                        key: ValueKey(
+                          'gallery-quick-corner-${page.rawImagePath}',
+                        ),
+                        tooltip: '모서리 수정',
+                        onPressed: onEditCorners,
+                        icon: Icons.crop_free,
+                        compact: compact,
                       ),
-                      tooltip: '모서리 수정',
-                      onPressed: onEditCorners,
-                      icon: Icons.crop_free,
-                      compact: compact,
-                    ),
+                    if (page.isMlKitPage)
+                      _GalleryActionButton(
+                        key: ValueKey(
+                          'gallery-mlkit-edit-${page.rawImagePath}',
+                        ),
+                        tooltip: '페이지 편집',
+                        onPressed: onEditPage,
+                        icon: Icons.edit_outlined,
+                        compact: compact,
+                      ),
                     _GalleryActionButton(
                       tooltip: '페이지 삭제',
                       onPressed: onDelete,
@@ -488,6 +535,22 @@ class _PageProcessingBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (!page.usesCustomImagePipeline) {
+      return DecoratedBox(
+        decoration: BoxDecoration(
+          color: Colors.green.withValues(alpha: 0.88),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+          child: Text(
+            'ML Kit',
+            key: ValueKey('page-processing-${page.rawImagePath}'),
+            style: const TextStyle(color: Colors.white, fontSize: 11),
+          ),
+        ),
+      );
+    }
     final (label, color) = switch ((
       page.correctionStatus,
       page.enhancementStatus,

@@ -13,6 +13,7 @@ import 'package:scana/models/scan_capture_mode.dart';
 import 'package:scana/models/page_enhancement.dart';
 import 'package:scana/models/page_crop.dart';
 import 'package:scana/models/ai_document_segmentation_result.dart';
+import 'package:scana/models/mlkit_page_edit_metadata.dart';
 import 'package:scana/services/image_processing/page_enhancer.dart';
 
 typedef AppPrivateDirectoryProvider = Future<Directory> Function();
@@ -114,9 +115,36 @@ class AppPrivateSessionStorage
           .map(
             (page) => <String, Object>{
               'pageNo': page.pageNo,
-              'rawImageFile': path.basename(page.rawImagePath),
+              'rawImageFile': _relativeSessionFile(
+                sessionDirectory.path,
+                page.rawImagePath,
+              ),
               'createdTime': page.createdTime.toIso8601String(),
               'rotation': page.rotation,
+              if (page.sourceType != ScanPageSourceType.scana)
+                'sourceType': page.sourceType.name,
+              if (page.mlKitLayout != null)
+                'mlKitLayout': page.mlKitLayout!.name,
+              if (page.originalSourcePath != null)
+                'originalSourceFile': _relativeSessionFile(
+                  sessionDirectory.path,
+                  page.originalSourcePath!,
+                ),
+              if (page.parentSpreadId != null)
+                'parentSpreadId': page.parentSpreadId!,
+              if (page.spreadSide != null)
+                'spreadSide': page.spreadSide!.name,
+              if (page.splitX != null) 'splitX': page.splitX!,
+              if (page.splitConfidence != null)
+                'splitConfidence': page.splitConfidence!,
+              'splitFallbackUsed': page.splitFallbackUsed,
+              if (page.mlKitCropRect != null)
+                'mlKitCropRect': page.mlKitCropRect!.toJson(),
+              if (page.editedImagePath != null)
+                'editedImageFile': _relativeSessionFile(
+                  sessionDirectory.path,
+                  page.editedImagePath!,
+                ),
               if (page.documentSourceWidth != null)
                 'documentSourceWidth': page.documentSourceWidth!,
               if (page.documentSourceHeight != null)
@@ -241,6 +269,26 @@ class AppPrivateSessionStorage
           pageData['createdTime'] as String? ?? '',
         );
         final rotation = pageData['rotation'] as int?;
+        final sourceType = ScanPageSourceType.values.firstWhere(
+          (source) => source.name == pageData['sourceType'],
+          orElse: () => ScanPageSourceType.scana,
+        );
+        final mlKitLayout = MlKitPageLayout.values
+            .where((layout) => layout.name == pageData['mlKitLayout'])
+            .firstOrNull;
+        final originalSourceFile = pageData['originalSourceFile'] as String?;
+        final parentSpreadId = pageData['parentSpreadId'] as String?;
+        final spreadSide = MlKitSpreadSide.values
+            .where((side) => side.name == pageData['spreadSide'])
+            .firstOrNull;
+        final splitX = pageData['splitX'] as int?;
+        final splitConfidence = (pageData['splitConfidence'] as num?)
+            ?.toDouble();
+        final splitFallbackUsed =
+            pageData['splitFallbackUsed'] as bool? ?? false;
+        final mlKitCropValue = pageData['mlKitCropRect'];
+        final mlKitCropRect = MlKitCropRect.fromJson(mlKitCropValue);
+        final editedImageFile = pageData['editedImageFile'] as String?;
         final sourceWidth = pageData['documentSourceWidth'] as int?;
         final sourceHeight = pageData['documentSourceHeight'] as int?;
         final cornersValue = pageData['documentCorners'];
@@ -307,7 +355,15 @@ class AppPrivateSessionStorage
             enhancementStatus == EnhancementStatus.completed;
         if (pageNo == null ||
             rawImageFile == null ||
-            !_isRelativeFileName(rawImageFile) ||
+            !_isSafeRelativePath(rawImageFile) ||
+            (originalSourceFile != null &&
+                !_isSafeRelativePath(originalSourceFile)) ||
+            (editedImageFile != null &&
+                !_isSafeRelativePath(editedImageFile)) ||
+            (mlKitCropValue != null && mlKitCropRect == null) ||
+            (splitX != null && splitX < 1) ||
+            (splitConfidence != null &&
+                (splitConfidence < 0 || splitConfidence > 1)) ||
             pageCreatedTime == null ||
             !_isValidRotation(rotation) ||
             (cornersValue != null && documentCorners == null) ||
@@ -323,6 +379,20 @@ class AppPrivateSessionStorage
         final rawImagePath = path.join(sessionDirectory.path, rawImageFile);
         if (!await File(rawImagePath).exists()) {
           return null;
+        }
+        final originalSourcePath = originalSourceFile == null
+            ? sourceType == ScanPageSourceType.scana
+                  ? null
+                  : rawImagePath
+            : path.join(sessionDirectory.path, originalSourceFile);
+        if (originalSourcePath != null &&
+            !await File(originalSourcePath).exists()) {
+          return null;
+        }
+        String? editedImagePath;
+        if (editedImageFile != null) {
+          final candidate = path.join(sessionDirectory.path, editedImageFile);
+          if (await File(candidate).exists()) editedImagePath = candidate;
         }
         String? correctedImagePath;
         if (correctedImageFile != null &&
@@ -370,6 +440,16 @@ class AppPrivateSessionStorage
             pageNo: pageNo,
             rawImagePath: rawImagePath,
             createdTime: pageCreatedTime,
+            sourceType: sourceType,
+            mlKitLayout: mlKitLayout,
+            originalSourcePath: originalSourcePath,
+            parentSpreadId: parentSpreadId,
+            spreadSide: spreadSide,
+            splitX: splitX,
+            splitConfidence: splitConfidence,
+            splitFallbackUsed: splitFallbackUsed,
+            mlKitCropRect: mlKitCropRect,
+            editedImagePath: editedImagePath,
             rotation: rotation!,
             documentCorners: documentCorners,
             pageBoundary: pageBoundary,
@@ -652,6 +732,25 @@ class AppPrivateSessionStorage
 
   static bool _isRelativeFileName(String value) {
     return !path.isAbsolute(value) && path.basename(value) == value;
+  }
+
+  static bool _isSafeRelativePath(String value) {
+    if (value.isEmpty || path.isAbsolute(value)) return false;
+    final normalized = path.normalize(value);
+    return normalized != '..' &&
+        !normalized.startsWith('..${path.separator}') &&
+        normalized == value;
+  }
+
+  static String _relativeSessionFile(String sessionPath, String filePath) {
+    final relative = path.relative(filePath, from: sessionPath);
+    if (!_isSafeRelativePath(relative)) {
+      throw FileSystemException(
+        'Page file must remain inside its scan session.',
+        filePath,
+      );
+    }
+    return relative;
   }
 
   static bool _isValidRotation(int? value) {

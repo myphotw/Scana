@@ -3,10 +3,19 @@ package com.myphotw.scana
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.ApplicationInfo
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
+import android.os.SystemClock
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
+import com.google.android.gms.common.GoogleApiAvailability
+import com.google.mlkit.common.MlKitException
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanner
+import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import com.myphotw.scana.imageprocessing.OpenCvDocumentDetector
 import com.myphotw.scana.imageprocessing.FairScanDocumentSegmenter
 import com.myphotw.scana.imageprocessing.OpenCvPageCorrector
@@ -31,14 +40,68 @@ class MainActivity : FlutterActivity() {
     private var pdfStorageChannel: MethodChannel? = null
     private var pdfDocumentChannel: MethodChannel? = null
     private var debugDiagnosticsChannel: MethodChannel? = null
+    private var mlKitScannerChannel: MethodChannel? = null
     private var pendingDirectoryResult: MethodChannel.Result? = null
     private var pendingDirectoryRequestId: Long? = null
     private var nextDirectoryRequestId = 0L
     private var pendingDebugExportResult: MethodChannel.Result? = null
     private var pendingDebugExportSource: File? = null
+    private var pendingMlKitScan: PendingMlKitScan? = null
+    private var mlKitScanState = MlKitScanState.IDLE
+    private var nextMlKitScanRequestId = 0L
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        startupLog("onCreate_begin")
+        try {
+            super.onCreate(savedInstanceState)
+            startupLog("onCreate_complete")
+        } catch (error: Throwable) {
+            startupLog("onCreate_failed", error)
+            throw error
+        }
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
-        super.configureFlutterEngine(flutterEngine)
+        startupLog("configureFlutterEngine_begin")
+        try {
+            super.configureFlutterEngine(flutterEngine)
+            configureFlutterChannels(flutterEngine)
+            startupLog("configureFlutterEngine_complete")
+        } catch (error: Throwable) {
+            startupLog("configureFlutterEngine_failed", error)
+            throw error
+        }
+    }
+
+    private fun configureFlutterChannels(flutterEngine: FlutterEngine) {
+        mlKitScannerChannel =
+            MethodChannel(
+                flutterEngine.dartExecutor.binaryMessenger,
+                MLKIT_DOCUMENT_SCANNER_CHANNEL,
+            ).also { channel ->
+                channel.setMethodCallHandler { call, result ->
+                    if (call.method != "startScan") {
+                        result.notImplemented()
+                        return@setMethodCallHandler
+                    }
+                    mlKitLifecycleLog("native_startScan_received")
+                    val sessionId = call.argument<String>("sessionId")
+                    val startPageNo = call.argument<Int>("startPageNo")
+                    if (sessionId.isNullOrBlank() ||
+                        !SAFE_SESSION_ID.matches(sessionId) ||
+                        startPageNo == null ||
+                        startPageNo < 1
+                    ) {
+                        result.error(
+                            "invalid_mlkit_scan",
+                            "ML Kit scan arguments are invalid.",
+                            null,
+                        )
+                        return@setMethodCallHandler
+                    }
+                    startMlKitScan(sessionId, startPageNo, result)
+                }
+            }
         detectorChannel =
             MethodChannel(
                 flutterEngine.dartExecutor.binaryMessenger,
@@ -300,7 +363,6 @@ class MainActivity : FlutterActivity() {
                     }
                 }
             }
-        localOcrService = AndroidLocalOcrService()
         ocrChannel =
             MethodChannel(
                 flutterEngine.dartExecutor.binaryMessenger,
@@ -313,10 +375,9 @@ class MainActivity : FlutterActivity() {
                     }
                     val imagePath = call.argument<String>("imagePath")
                     val sourcePageId = call.argument<String>("sourcePageId")
-                    val service = localOcrService
+                    val service = localOcrService()
                     if (imagePath.isNullOrBlank() ||
-                        sourcePageId.isNullOrBlank() ||
-                        service == null
+                        sourcePageId.isNullOrBlank()
                     ) {
                         result.error(
                             "invalid_ocr_arguments",
@@ -516,6 +577,10 @@ class MainActivity : FlutterActivity() {
 
     @Deprecated("Deprecated in Android; retained for FlutterActivity SAF compatibility.")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == REQUEST_MLKIT_SCAN) {
+            completeMlKitScan(resultCode, data)
+            return
+        }
         if (requestCode == REQUEST_DEBUG_LOG_EXPORT) {
             completeDebugLogExport(resultCode, data)
             return
@@ -558,6 +623,13 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        mlKitScannerChannel?.setMethodCallHandler(null)
+        mlKitScannerChannel = null
+        resetMlKitScan(reason = "flutter_engine_cleanup")?.result?.error(
+            "mlkit_scan_cancelled",
+            "The Flutter engine was detached while ML Kit scanner was open.",
+            null,
+        )
         detectorChannel?.setMethodCallHandler(null)
         detectorChannel = null
         aiSegmenterChannel?.setMethodCallHandler(null)
@@ -634,9 +706,492 @@ class MainActivity : FlutterActivity() {
     }
 
     @Synchronized
+    private fun startMlKitScan(
+        sessionId: String,
+        startPageNo: Int,
+        result: MethodChannel.Result,
+    ) {
+        if (pendingMlKitScan == null && mlKitScanState != MlKitScanState.IDLE) {
+            val staleState = mlKitScanState
+            mlKitScanState = MlKitScanState.IDLE
+            mlKitLifecycleLog(
+                "scan_state_reset",
+                "requestId=none from=${staleState.name.lowercase()} reason=missing_pending",
+            )
+        }
+        if (mlKitScanState != MlKitScanState.IDLE || pendingMlKitScan != null) {
+            mlKitLifecycleLog(
+                "startScan_rejected_already_running",
+                "requestedSession=$sessionId requestedStartPageNo=$startPageNo",
+            )
+            result.error(
+                "mlkit_scan_in_progress",
+                "An ML Kit scan is already running.",
+                mapOf(
+                    "state" to mlKitScanState.name.lowercase(),
+                    "pendingRequestId" to pendingMlKitScan?.requestId,
+                ),
+            )
+            return
+        }
+        nextMlKitScanRequestId += 1
+        val request = PendingMlKitScan(
+            requestId = nextMlKitScanRequestId,
+            result = result,
+            sessionId = sessionId,
+            startPageNo = startPageNo,
+            launchStartedElapsedMs = SystemClock.elapsedRealtime(),
+        )
+        pendingMlKitScan = request
+        mlKitScanState = MlKitScanState.PREPARING
+        mlKitLifecycleLog(
+            "scan_state_preparing",
+            "requestId=${request.requestId} session=$sessionId startPageNo=$startPageNo",
+        )
+        debugLog(
+            "MLKIT_SCAN",
+            "launch_requested session=$sessionId startPageNo=$startPageNo",
+        )
+        var preparationStage = "options_build_start"
+        try {
+            mlKitLifecycleLog(preparationStage, "requestId=${request.requestId}")
+            preparationStage = "options_build"
+            val scanner = createOfficialSampleScannerClient { options ->
+                preparationStage = "get_client"
+                runCatching {
+                    mlKitLifecycleLog(
+                        "get_client_start",
+                        "requestId=${request.requestId} optionsNonNull=true " +
+                            "optionsClass=${options.javaClass.name} " +
+                            "optionsIdentity=${System.identityHashCode(options)}",
+                    )
+                }
+            }
+            mlKitLifecycleLog("get_client_success", "requestId=${request.requestId}")
+
+            preparationStage = "get_start_intent"
+            mlKitLifecycleLog("get_start_intent_start", "requestId=${request.requestId}")
+            val startIntentTask = scanner.getStartScanIntent(this@MainActivity)
+            mlKitLifecycleLog(
+                "get_start_intent_task_created",
+                "requestId=${request.requestId}",
+            )
+
+            preparationStage = "listener_registration"
+            mlKitLifecycleLog("listener_registration_start", "requestId=${request.requestId}")
+            startIntentTask.addOnSuccessListener { intentSender ->
+                if (!markMlKitScannerActive(request)) {
+                    mlKitLifecycleLog(
+                        "getStartScanIntent_success_ignored",
+                        "requestId=${request.requestId}",
+                    )
+                    return@addOnSuccessListener
+                }
+                mlKitLifecycleLog(
+                    "getStartScanIntent_success",
+                    "requestId=${request.requestId}",
+                )
+                try {
+                    startIntentSenderForResult(
+                        intentSender,
+                        REQUEST_MLKIT_SCAN,
+                        null,
+                        0,
+                        0,
+                        0,
+                    )
+                    mlKitLifecycleLog(
+                        "scanner_activity_launched",
+                        "requestId=${request.requestId}",
+                    )
+                    debugLog("MLKIT_SCAN", "scanner_activity_started")
+                } catch (error: Throwable) {
+                    failMlKitLaunch(request, error, "scanner_activity_launch")
+                }
+            }
+            startIntentTask.addOnFailureListener { error ->
+                failMlKitLaunch(request, error, "get_start_intent_task_failure")
+            }
+            mlKitLifecycleLog(
+                "listener_registration_success",
+                "requestId=${request.requestId}",
+            )
+        } catch (error: Throwable) {
+            failMlKitLaunch(request, error, preparationStage)
+        }
+    }
+
+    /**
+     * Deliberately mirrors Google's minimal Document Scanner sample. Scanner
+     * lifecycle, Flutter workflow, OCR, and page processing do not enter this
+     * construction path.
+     */
+    private fun createOfficialSampleScannerClient(
+        onOptionsBuilt: (GmsDocumentScannerOptions) -> Unit,
+    ): GmsDocumentScanner {
+        val options = GmsDocumentScannerOptions.Builder()
+            .setGalleryImportAllowed(false)
+            .setPageLimit(20)
+            .setResultFormats(GmsDocumentScannerOptions.RESULT_FORMAT_JPEG)
+            .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
+            .build()
+        onOptionsBuilt(options)
+        return GmsDocumentScanning.getClient(options)
+    }
+
+    @Synchronized
+    private fun markMlKitScannerActive(request: PendingMlKitScan): Boolean {
+        if (pendingMlKitScan !== request || mlKitScanState != MlKitScanState.PREPARING) {
+            return false
+        }
+        mlKitScanState = MlKitScanState.ACTIVE
+        return true
+    }
+
+    @Synchronized
+    private fun markMlKitResultProcessing(): PendingMlKitScan? {
+        val pending = pendingMlKitScan ?: return null
+        if (mlKitScanState != MlKitScanState.ACTIVE) return null
+        mlKitScanState = MlKitScanState.PROCESSING_RESULT
+        return pending
+    }
+
+    private fun failMlKitLaunch(
+        request: PendingMlKitScan,
+        error: Throwable,
+        stage: String,
+    ) {
+        val failureState = mlKitScanState.name.lowercase()
+        mlKitLifecycleLog(
+            "getStartScanIntent_failure",
+            "requestId=${request.requestId} stage=$stage " +
+                "type=${error.javaClass.name} message=${error.message}",
+        )
+        val pending = resetMlKitScan(request, reason = "launch_error") ?: return
+        val details = mlKitLaunchFailureDetails(
+            error,
+            stage,
+            request.requestId,
+            failureState,
+        )
+        val code = if (error is MlKitException) {
+            "mlkit_${error.errorCode}"
+        } else {
+            "mlkit_${error.javaClass.simpleName.ifBlank { "launch_failure" }}"
+        }
+        mlKitScannerFailureLog(details, error)
+        debugLog(
+            "MLKIT_SCAN",
+            "launch_failed code=$code type=${details["exceptionClass"]} " +
+                "errorCode=${details["errorCode"]} message=${details["message"]}",
+        )
+        pending.result.error(
+            code,
+            error.message ?: "ML Kit scanner could not be prepared.",
+            details,
+        )
+    }
+
+    private fun mlKitLaunchFailureDetails(
+        error: Throwable,
+        stage: String,
+        requestId: Long,
+        scannerState: String,
+    ): Map<String, Any?> {
+        val exceptionFrame = error.stackTrace.firstOrNull()
+        val scanaFrame = error.stackTrace.firstOrNull { frame ->
+            frame.className == MainActivity::class.java.name
+        }
+        val details = linkedMapOf<String, Any?>(
+            "buildMode" to if (isDebuggable) "debug" else "release",
+            "requestId" to requestId,
+            "scannerState" to scannerState,
+            "stage" to stage,
+            "exceptionClass" to error.javaClass.name,
+            "errorCode" to (error as? MlKitException)?.errorCode,
+            "message" to error.message,
+            "causeClass" to error.cause?.javaClass?.name,
+            "causeMessage" to error.cause?.message,
+            "exceptionFile" to exceptionFrame?.fileName,
+            "exceptionLineNumber" to exceptionFrame?.lineNumber,
+            "exceptionMethod" to exceptionFrame?.methodName,
+            "exceptionOriginClass" to exceptionFrame?.className,
+            "exceptionLine" to exceptionFrame?.let { frame ->
+                "${frame.fileName ?: "unknown"}:${frame.lineNumber}"
+            },
+            "scanaExceptionLine" to scanaFrame?.let { frame ->
+                "${frame.fileName ?: "unknown"}:${frame.lineNumber}"
+            },
+        )
+        runCatching {
+            val googleApiAvailability = GoogleApiAvailability.getInstance()
+            val googlePlayServicesStatus =
+                googleApiAvailability.isGooglePlayServicesAvailable(this@MainActivity)
+            val appPackageInfo = runCatching {
+                packageManager.getPackageInfo(packageName, 0)
+            }.getOrNull()
+            val googlePlayServicesPackageInfo = runCatching {
+                packageManager.getPackageInfo(GOOGLE_PLAY_SERVICES_PACKAGE, 0)
+            }.getOrNull()
+            details.putAll(
+                mapOf(
+                    "googlePlayServicesStatus" to googlePlayServicesStatus,
+                    "googlePlayServicesStatusName" to
+                        googleApiAvailability.getErrorString(googlePlayServicesStatus),
+                    "googlePlayServicesVersionCode" to
+                        googlePlayServicesPackageInfo?.compatibleLongVersionCode(),
+                    "packageName" to packageName,
+                    "versionCode" to appPackageInfo?.compatibleLongVersionCode(),
+                    "versionName" to appPackageInfo?.versionName,
+                ),
+            )
+        }.onFailure { diagnosticsError ->
+            details["diagnosticsErrorClass"] = diagnosticsError.javaClass.name
+            details["diagnosticsErrorMessage"] = diagnosticsError.message
+            mlKitLifecycleLog(
+                "diagnostics_collection_failure",
+                "requestId=$requestId type=${diagnosticsError.javaClass.name} " +
+                    "message=${diagnosticsError.message}",
+            )
+        }
+        return details
+    }
+
+    private fun android.content.pm.PackageInfo.compatibleLongVersionCode(): Long =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) longVersionCode else {
+            @Suppress("DEPRECATION")
+            versionCode.toLong()
+        }
+
+    @Synchronized
+    private fun mlKitScannerFailureLog(
+        details: Map<String, Any?>,
+        error: Throwable,
+    ) {
+        runCatching {
+            val directory = File(filesDir, "diagnostics").apply { mkdirs() }
+            val entry = buildString {
+                append("[MLKIT_SCANNER_FAILURE]\n")
+                append("timestamp=").append(System.currentTimeMillis()).append('\n')
+                details.forEach { (key, value) ->
+                    append(key).append('=').append(value ?: "null").append('\n')
+                }
+                append("stackTrace=").append(error.stackTraceToString()).append('\n')
+            }
+            File(directory, "scana_mlkit_scanner.log").appendText(entry)
+        }
+    }
+
+    @Synchronized
+    private fun mlKitLifecycleLog(event: String, details: String = "") {
+        runCatching {
+            val directory = File(filesDir, "diagnostics").apply { mkdirs() }
+            val pendingRequestId = pendingMlKitScan?.requestId ?: "none"
+            File(directory, "scana_mlkit_scanner.log").appendText(
+                "[MLKIT_SCANNER_LIFECYCLE] " +
+                    "timestamp=${System.currentTimeMillis()} " +
+                    "event=$event state=${mlKitScanState.name.lowercase()} " +
+                    "pendingRequestId=$pendingRequestId $details\n",
+            )
+        }
+    }
+
+    private fun completeMlKitScan(resultCode: Int, data: Intent?) {
+        mlKitLifecycleLog("result_received", "resultCode=$resultCode")
+        if (resultCode != Activity.RESULT_OK) {
+            val pending = pendingMlKitScan ?: run {
+                debugLog("MLKIT_SCAN", "result_ignored no_pending_request")
+                return
+            }
+            mlKitLifecycleLog(
+                "cancel",
+                "requestId=${pending.requestId} resultCode=$resultCode",
+            )
+            val cancelled = resetMlKitScan(pending, reason = "cancel") ?: return
+            val returnedElapsedMs = SystemClock.elapsedRealtime()
+            debugLog(
+                "MLKIT_SCAN",
+                "result_cancelled elapsedMs=${returnedElapsedMs - cancelled.launchStartedElapsedMs}",
+            )
+            cancelled.result.success(
+                mapOf(
+                    "status" to "cancelled",
+                    "launchStartedElapsedMs" to cancelled.launchStartedElapsedMs,
+                    "resultReturnedElapsedMs" to returnedElapsedMs,
+                ),
+            )
+            return
+        }
+        val pending = markMlKitResultProcessing() ?: run {
+            mlKitLifecycleLog(
+                "error",
+                "message=successful result received outside active state",
+            )
+            resetMlKitScan(reason = "unexpected_result_state")?.result?.error(
+                "mlkit_result_state_invalid",
+                "ML Kit scan result arrived in an invalid lifecycle state.",
+                null,
+            )
+            debugLog("MLKIT_SCAN", "result_ignored invalid_state")
+            return
+        }
+        val returnedElapsedMs = SystemClock.elapsedRealtime()
+        detectorExecutor.execute {
+            try {
+                val value = copyMlKitJpegs(pending, data, returnedElapsedMs)
+                runOnUiThread {
+                    mlKitLifecycleLog(
+                        "success",
+                        "requestId=${pending.requestId}",
+                    )
+                    val completed = resetMlKitScan(pending, reason = "success")
+                        ?: return@runOnUiThread
+                    completed.result.success(value)
+                }
+            } catch (error: Throwable) {
+                debugLog("MLKIT_SCAN", "result_failed error=${error.message}")
+                runOnUiThread {
+                    mlKitLifecycleLog(
+                        "error",
+                        "requestId=${pending.requestId} type=${error.javaClass.name} " +
+                            "message=${error.message}",
+                    )
+                    val failed = resetMlKitScan(pending, reason = "result_error")
+                        ?: return@runOnUiThread
+                    failed.result.error(
+                        "mlkit_result_failed",
+                        error.message ?: "ML Kit scan result could not be imported.",
+                        null,
+                    )
+                }
+            }
+        }
+    }
+
+    private fun copyMlKitJpegs(
+        pending: PendingMlKitScan,
+        data: Intent?,
+        returnedElapsedMs: Long,
+    ): Map<String, Any> {
+        val scanResult = GmsDocumentScanningResult.fromActivityResultIntent(data)
+        val pages = scanResult?.pages.orEmpty()
+        val destinationDirectory = File(
+            File(File(filesDir, "scan_sessions"), pending.sessionId),
+            "mlkit",
+        ).apply { mkdirs() }
+        check(destinationDirectory.isDirectory) {
+            "ML Kit session directory could not be created."
+        }
+        val createdFiles = mutableListOf<File>()
+        try {
+            val copiedPages = pages.mapIndexed { index, page ->
+                val pageNo = pending.startPageNo + index
+                val destination = File(
+                    destinationDirectory,
+                    "page_${pageNo.toString().padStart(3, '0')}.jpg",
+                )
+                check(!destination.exists()) { "ML Kit page already exists: $pageNo" }
+                val byteCount = contentResolver.openInputStream(page.imageUri)?.use { input ->
+                    destination.outputStream().use { output -> input.copyTo(output) }
+                } ?: throw IllegalStateException("ML Kit JPEG could not be opened.")
+                createdFiles.add(destination)
+                check(byteCount > 0 && destination.length() == byteCount) {
+                    "ML Kit JPEG copy was incomplete."
+                }
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(destination.path, bounds)
+                check(bounds.outWidth > 0 && bounds.outHeight > 0) {
+                    "ML Kit result is not a readable JPEG image."
+                }
+                debugLog(
+                    "MLKIT_SCAN",
+                    "page=$pageNo bytes=$byteCount size=${bounds.outWidth}x${bounds.outHeight}",
+                )
+                mapOf(
+                    "filePath" to destination.absolutePath,
+                    "byteCount" to byteCount,
+                    "width" to bounds.outWidth,
+                    "height" to bounds.outHeight,
+                )
+            }
+            debugLog(
+                "MLKIT_SCAN",
+                "result_completed pages=${copiedPages.size} " +
+                    "elapsedMs=${returnedElapsedMs - pending.launchStartedElapsedMs}",
+            )
+            return mapOf(
+                "status" to "completed",
+                "pages" to copiedPages,
+                "pageCount" to copiedPages.size,
+                "launchStartedElapsedMs" to pending.launchStartedElapsedMs,
+                "resultReturnedElapsedMs" to returnedElapsedMs,
+            )
+        } catch (error: Throwable) {
+            createdFiles.forEach { file -> runCatching { file.delete() } }
+            throw error
+        }
+    }
+
+    @Synchronized
+    private fun resetMlKitScan(
+        expected: PendingMlKitScan? = null,
+        reason: String,
+    ): PendingMlKitScan? {
+        val pending = pendingMlKitScan
+        if (pending == null) {
+            if (mlKitScanState != MlKitScanState.IDLE) {
+                val previousState = mlKitScanState
+                mlKitScanState = MlKitScanState.IDLE
+                mlKitLifecycleLog(
+                    "scan_state_reset",
+                    "requestId=none from=${previousState.name.lowercase()} reason=$reason",
+                )
+            }
+            return null
+        }
+        if (expected != null && pending !== expected) return null
+        pendingMlKitScan = null
+        val previousState = mlKitScanState
+        mlKitScanState = MlKitScanState.IDLE
+        mlKitLifecycleLog(
+            "scan_state_reset",
+            "requestId=${pending.requestId} from=${previousState.name.lowercase()} reason=$reason",
+        )
+        return pending
+    }
+
+    @Synchronized
     private fun aiSegmenter(): FairScanDocumentSegmenter {
         return aiSegmenter ?: FairScanDocumentSegmenter(applicationContext).also {
             aiSegmenter = it
+        }
+    }
+
+    @Synchronized
+    private fun localOcrService(): AndroidLocalOcrService {
+        return localOcrService ?: AndroidLocalOcrService().also {
+            localOcrService = it
+        }
+    }
+
+    private fun startupLog(event: String, error: Throwable? = null) {
+        runCatching {
+            val directory = File(filesDir, "startup").apply { mkdirs() }
+            val details = buildString {
+                append(System.currentTimeMillis())
+                append(' ')
+                append(event)
+                if (error != null) {
+                    append(" type=")
+                    append(error.javaClass.name)
+                    append(" message=")
+                    append(error.message)
+                    append('\n')
+                    append(error.stackTraceToString())
+                }
+                append('\n')
+            }
+            File(directory, "scana_native_startup.log").appendText(details)
         }
     }
 
@@ -808,6 +1363,24 @@ class MainActivity : FlutterActivity() {
         get() = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
 
     private companion object {
+        enum class MlKitScanState {
+            IDLE,
+            PREPARING,
+            ACTIVE,
+            PROCESSING_RESULT,
+        }
+
+        data class PendingMlKitScan(
+            val requestId: Long,
+            val result: MethodChannel.Result,
+            val sessionId: String,
+            val startPageNo: Int,
+            val launchStartedElapsedMs: Long,
+        )
+
+        val SAFE_SESSION_ID = Regex("^[A-Za-z0-9_-]+$")
+        const val MLKIT_DOCUMENT_SCANNER_CHANNEL =
+            "com.myphotw.scana/mlkit_document_scanner"
         const val DOCUMENT_DETECTOR_CHANNEL = "com.myphotw.scana/document_detector"
         const val AI_SEGMENTER_CHANNEL = "com.myphotw.scana/ai_document_segmenter"
         const val PAGE_CORRECTOR_CHANNEL = "com.myphotw.scana/page_corrector"
@@ -820,5 +1393,7 @@ class MainActivity : FlutterActivity() {
         const val PREF_RECENT_DIRECTORY = "recent_directory_uri"
         const val REQUEST_PDF_DIRECTORY = 4701
         const val REQUEST_DEBUG_LOG_EXPORT = 4702
+        const val REQUEST_MLKIT_SCAN = 4703
+        const val GOOGLE_PLAY_SERVICES_PACKAGE = "com.google.android.gms"
     }
 }

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:scana/features/camera/presentation/camera_preview_page.dart';
 import 'package:scana/features/page_editor/presentation/page_editor_page.dart';
 import 'package:scana/features/page_editor/presentation/quick_corner_edit_page.dart';
+import 'package:scana/features/page_editor/presentation/mlkit_page_edit_page.dart';
 import 'package:scana/features/scan_result/presentation/page_management_page.dart';
 import 'package:scana/features/scan_session/application/scan_session_manager.dart';
 import 'package:scana/models/scan_page.dart';
@@ -77,21 +78,31 @@ class _ScanResultViewerPageState extends State<ScanResultViewerPage> {
           return const Scaffold(body: SizedBox.shrink());
         }
         final currentIndex = _pageIndex.clamp(0, pages.length - 1);
+        final currentPage = pages[currentIndex];
         return Scaffold(
           appBar: AppBar(
             title: Text('${currentIndex + 1} / ${pages.length}'),
             actions: [
-              IconButton(
-                key: const ValueKey('viewer-detailed-editor-button'),
-                tooltip: '페이지 편집',
-                onPressed: () => _openDetailedEditor(currentIndex),
-                icon: const Icon(Icons.edit_outlined),
-              ),
+              if (currentPage.usesCustomImagePipeline)
+                IconButton(
+                  key: const ValueKey('viewer-detailed-editor-button'),
+                  tooltip: '페이지 편집',
+                  onPressed: () => _openDetailedEditor(currentIndex),
+                  icon: const Icon(Icons.edit_outlined),
+                ),
+              if (currentPage.isMlKitPage)
+                IconButton(
+                  key: const ValueKey('viewer-mlkit-editor-button'),
+                  tooltip: '페이지 편집',
+                  onPressed: () => _openMlKitEditor(currentIndex),
+                  icon: const Icon(Icons.edit_outlined),
+                ),
               IconButton(
                 key: const ValueKey('viewer-rotate-button'),
                 tooltip: '오른쪽으로 회전',
-                onPressed: () =>
-                    widget.sessionManager.rotatePageAt(currentIndex),
+                onPressed: () => currentPage.isMlKitPage
+                    ? widget.sessionManager.rotateMlKitPageAt(currentIndex)
+                    : widget.sessionManager.rotatePageAt(currentIndex),
                 icon: const Icon(Icons.rotate_right),
               ),
               IconButton(
@@ -115,24 +126,37 @@ class _ScanResultViewerPageState extends State<ScanResultViewerPage> {
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
               child: Row(
                 children: [
-                  Expanded(
-                    child: _ViewerActionButton(
-                      key: const ValueKey('viewer-retake-button'),
-                      onPressed: () => _retake(currentIndex),
-                      icon: Icons.camera_alt_outlined,
-                      label: '재촬영',
+                  if (currentPage.usesCustomImagePipeline) ...[
+                    Expanded(
+                      child: _ViewerActionButton(
+                        key: const ValueKey('viewer-retake-button'),
+                        onPressed: () => _retake(currentIndex),
+                        icon: Icons.camera_alt_outlined,
+                        label: '재촬영',
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _ViewerActionButton(
-                      key: const ValueKey('viewer-quick-corner-button'),
-                      onPressed: () => _quickEdit(currentIndex),
-                      icon: Icons.crop_free,
-                      label: '모서리 수정',
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _ViewerActionButton(
+                        key: const ValueKey('viewer-quick-corner-button'),
+                        onPressed: () => _quickEdit(currentIndex),
+                        icon: Icons.crop_free,
+                        label: '모서리 수정',
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
+                    const SizedBox(width: 8),
+                  ],
+                  if (currentPage.isMlKitPage) ...[
+                    Expanded(
+                      child: _ViewerActionButton(
+                        key: const ValueKey('viewer-mlkit-edit-button'),
+                        onPressed: () => _openMlKitEditor(currentIndex),
+                        icon: Icons.edit_outlined,
+                        label: '편집',
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
                   Expanded(
                     child: _ViewerActionButton(
                       key: const ValueKey('viewer-delete-button'),
@@ -213,6 +237,25 @@ class _ScanResultViewerPageState extends State<ScanResultViewerPage> {
       ),
     );
     if (!mounted) return;
+  }
+
+  Future<void> _openMlKitEditor(int index) async {
+    final mutation = await Navigator.of(context).push<MlKitPageMutation>(
+      MaterialPageRoute<MlKitPageMutation>(
+        builder: (context) => MlKitPageEditPage(
+          sessionManager: widget.sessionManager,
+          pageIndex: index,
+          orientationController: widget.orientationController,
+        ),
+      ),
+    );
+    if (!mounted || mutation == null || mutation.pages.isEmpty) return;
+    final pages = widget.sessionManager.currentSession?.pages ?? const [];
+    final targetPath = mutation.pages.first.rawImagePath;
+    final target = pages.indexWhere((page) => page.rawImagePath == targetPath);
+    if (target < 0) return;
+    setState(() => _pageIndex = target);
+    if (_pageController.hasClients) _pageController.jumpToPage(target);
   }
 
   Future<void> _delete(int index) async {

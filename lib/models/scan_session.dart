@@ -40,6 +40,26 @@ class ScanSession {
     _pages[index] = page.copyWith(pageNo: _pages[index].pageNo);
   }
 
+  void replacePageRange(int index, int count, List<ScanPage> replacements) {
+    _pages.replaceRange(index, index + count, replacements);
+    _renumberPages();
+  }
+
+  void replacePagesByRawPath(
+    Set<String> rawPaths,
+    List<ScanPage> replacements,
+  ) {
+    final indices = <int>[
+      for (var index = 0; index < _pages.length; index++)
+        if (rawPaths.contains(_pages[index].rawImagePath)) index,
+    ];
+    if (indices.isEmpty) return;
+    final insertionIndex = indices.first;
+    _pages.removeWhere((page) => rawPaths.contains(page.rawImagePath));
+    _pages.insertAll(insertionIndex.clamp(0, _pages.length), replacements);
+    _renumberPages();
+  }
+
   void reorderPages(int oldIndex, int newIndex) {
     final page = _pages.removeAt(oldIndex);
     _pages.insert(newIndex, page);

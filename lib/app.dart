@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import 'package:scana/features/camera/presentation/camera_preview_page.dart';
+import 'package:scana/features/home/presentation/scan_home_page.dart';
 import 'package:scana/features/scan_session/application/scan_session_manager.dart';
 import 'package:scana/models/scan_session.dart';
 import 'package:scana/services/camera/camera_session.dart';
@@ -86,7 +86,7 @@ class _ScanaAppState extends State<ScanaApp> with WidgetsBindingObserver {
         useMaterial3: true,
       ),
       navigatorObservers: [_navigatorObserver],
-      home: CameraPreviewPage(
+      home: ScanHomePage(
         cameraStartup: widget.cameraStartup,
         sessionManager: _sessionManager,
         recoverySession: widget.recoverySession,

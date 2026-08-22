@@ -4,6 +4,9 @@ import 'package:scana/models/page_boundary.dart';
 import 'package:scana/models/page_enhancement.dart';
 import 'package:scana/models/page_crop.dart';
 import 'package:scana/models/ai_document_segmentation_result.dart';
+import 'package:scana/models/mlkit_page_edit_metadata.dart';
+
+enum ScanPageSourceType { scana, mlKit, mlKitSpread }
 
 /// A raw page captured during a scan session.
 class ScanPage {
@@ -11,6 +14,16 @@ class ScanPage {
     required this.pageNo,
     required this.rawImagePath,
     required this.createdTime,
+    this.sourceType = ScanPageSourceType.scana,
+    this.mlKitLayout,
+    this.originalSourcePath,
+    this.parentSpreadId,
+    this.spreadSide,
+    this.splitX,
+    this.splitConfidence,
+    this.splitFallbackUsed = false,
+    this.mlKitCropRect,
+    this.editedImagePath,
     this.rotation = 0,
     this.documentCorners,
     this.pageBoundary,
@@ -46,6 +59,16 @@ class ScanPage {
   final int pageNo;
   final String rawImagePath;
   final DateTime createdTime;
+  final ScanPageSourceType sourceType;
+  final MlKitPageLayout? mlKitLayout;
+  final String? originalSourcePath;
+  final String? parentSpreadId;
+  final MlKitSpreadSide? spreadSide;
+  final int? splitX;
+  final double? splitConfidence;
+  final bool splitFallbackUsed;
+  final MlKitCropRect? mlKitCropRect;
+  final String? editedImagePath;
   final int rotation;
   final DocumentCorners? documentCorners;
   final PageBoundary? pageBoundary;
@@ -75,8 +98,15 @@ class ScanPage {
   final EnhancementStatus enhancementStatus;
   final bool enhancementApplied;
 
+  bool get usesCustomImagePipeline => sourceType == ScanPageSourceType.scana;
+  bool get isMlKitPage => !usesCustomImagePipeline;
+  bool get isMlKitSpreadChild =>
+      sourceType == ScanPageSourceType.mlKitSpread && parentSpreadId != null;
+  String get editableSourcePath => originalSourcePath ?? rawImagePath;
+
   /// Final page appearance shared by Viewer, Gallery, PDF, and thumbnails.
   String get displayImagePath {
+    if (isMlKitPage) return editedImagePath ?? rawImagePath;
     if (enhancementMode == EnhancementMode.originalColor) {
       return correctedImagePath ?? rawImagePath;
     }
@@ -90,6 +120,17 @@ class ScanPage {
   ScanPage copyWith({
     int? pageNo,
     int? rotation,
+    ScanPageSourceType? sourceType,
+    MlKitPageLayout? mlKitLayout,
+    String? originalSourcePath,
+    String? parentSpreadId,
+    MlKitSpreadSide? spreadSide,
+    int? splitX,
+    double? splitConfidence,
+    bool? splitFallbackUsed,
+    MlKitCropRect? mlKitCropRect,
+    String? editedImagePath,
+    bool clearEditedImagePath = false,
     DocumentCorners? documentCorners,
     PageBoundary? pageBoundary,
     int? documentSourceWidth,
@@ -124,6 +165,18 @@ class ScanPage {
       pageNo: pageNo ?? this.pageNo,
       rawImagePath: rawImagePath,
       createdTime: createdTime,
+      sourceType: sourceType ?? this.sourceType,
+      mlKitLayout: mlKitLayout ?? this.mlKitLayout,
+      originalSourcePath: originalSourcePath ?? this.originalSourcePath,
+      parentSpreadId: parentSpreadId ?? this.parentSpreadId,
+      spreadSide: spreadSide ?? this.spreadSide,
+      splitX: splitX ?? this.splitX,
+      splitConfidence: splitConfidence ?? this.splitConfidence,
+      splitFallbackUsed: splitFallbackUsed ?? this.splitFallbackUsed,
+      mlKitCropRect: mlKitCropRect ?? this.mlKitCropRect,
+      editedImagePath: clearEditedImagePath
+          ? null
+          : editedImagePath ?? this.editedImagePath,
       rotation: rotation ?? this.rotation,
       documentCorners: documentCorners ?? this.documentCorners,
       pageBoundary: pageBoundary ?? this.pageBoundary,

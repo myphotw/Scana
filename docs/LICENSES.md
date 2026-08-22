@@ -17,6 +17,8 @@
 | LiteRT 1.4.1 (`com.google.ai.edge.litert:litert`) | FairScan segmentation TFLite CPU/XNNPACK 오프라인 추론 | Apache License 2.0 |
 | FairScan Document Segmentation Model v1.2.0 | AI-PoC 문서 probability mask 생성, DeepLabV3Plus + MobileNetV2, dynamic-range quantized TFLite | GNU GPL v3 |
 | Google ML Kit Text Recognition Korean 16.0.1 (`com.google.mlkit:text-recognition-korean`) | bundled 기기 내 한국어 OCR·PDF 제목 제안 | Google ML Kit Terms / Google APIs Terms (비 오픈소스 SDK) |
+| Google Play services ML Kit Document Scanner 16.0.0 (`com.google.android.gms:play-services-mlkit-document-scanner`) | Production 기본 스캐너 UI·문서 보정·JPEG 결과 | Google APIs Terms / Google Play services SDK Terms (비 오픈소스 SDK) |
+| image 4.9.1 | ML Kit 2면 JPEG의 원본 해상도 ROI crop 및 lossless PNG 저장 | BSD 3-Clause |
 
 ## 도입 규칙
 
@@ -40,6 +42,17 @@ Google ML Kit Text Recognition v2 Korean 16.0.1은 Android 앱에 모델을 정�
 
 - 공식 Android Text Recognition v2: https://developers.google.com/ml-kit/vision/text-recognition/v2/android
 - 공식 언어 지원: https://developers.google.com/ml-kit/vision/text-recognition/v2/languages
+- Google ML Kit Terms: https://developers.google.com/ml-kit/terms
+- Google APIs Terms: https://developers.google.com/terms
+
+Google Play services ML Kit Document Scanner 16.0.0은 Scana production primary 촬영·문서 인식·보정 엔진으로 사용한다. 모델·스캔 로직·UI는 Google Play services가 첫 실행 시 동적으로 다운로드할 수 있으므로, 최초 준비에는 인터넷 연결과 호환되는 Google Play services가 필요하다. 스캔 처리와 결과 JPEG 생성은 Google 제공 기기 내 UI 흐름에서 수행되며 Scana는 결과 JPEG를 외부 서버로 전송하지 않는다. 이 SDK는 무료로 사용할 수 있지만 오픈소스가 아니며 최초 실행 완전 오프라인을 보장하지 않으므로 배포 약관과 제품 정책을 지속해서 확인한다.
+
+`image` 4.9.1은 ML Kit가 생성한 펼친 책 JPEG를 메모리에서 원본 크기로 decode한 뒤 좌·우 ROI만 crop하고 lossless PNG로 저장하는 데 사용한다. resize, sharpening, 색상 enhancement 및 JPEG 재압축은 수행하지 않는다.
+
+- image package: https://pub.dev/packages/image
+- image license: https://pub.dev/packages/image/license
+
+- 공식 Android Document Scanner 가이드: https://developers.google.com/ml-kit/vision/doc-scanner/android
 - Google ML Kit Terms: https://developers.google.com/ml-kit/terms
 - Google APIs Terms: https://developers.google.com/terms
 

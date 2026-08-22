@@ -30,20 +30,24 @@ class DebugDiagnostics with WidgetsBindingObserver {
   AppLifecycleState? get lifecycleState => _lifecycleState;
 
   Future<void> initialize() async {
-    if (!kDebugMode || _installed) return;
-    final supportDirectory = await getApplicationSupportDirectory();
-    final debugDirectory = Directory(
-      '${supportDirectory.path}${Platform.pathSeparator}debug',
-    );
-    await debugDirectory.create(recursive: true);
-    _logFile = File(
-      '${debugDirectory.path}${Platform.pathSeparator}scana_debug.log',
-    );
+    if (_installed) return;
+    try {
+      final supportDirectory = await getApplicationSupportDirectory();
+      final diagnosticsDirectory = Directory(
+        '${supportDirectory.path}${Platform.pathSeparator}startup',
+      );
+      await diagnosticsDirectory.create(recursive: true);
+      _logFile = File(
+        '${diagnosticsDirectory.path}${Platform.pathSeparator}scana_startup.log',
+      );
+    } on Object catch (error) {
+      debugPrint('[STARTUP] diagnostics initialization failed: $error');
+    }
     _lifecycleState = WidgetsBinding.instance.lifecycleState;
     WidgetsBinding.instance.addObserver(this);
     _installErrorHandlers();
     _installed = true;
-    log('DIAGNOSTICS', 'initialized path=${_logFile!.path}');
+    logStartup('STARTUP', 'diagnostics_initialized path=${_logFile?.path}');
   }
 
   void _installErrorHandlers() {
@@ -71,7 +75,7 @@ class DebugDiagnostics with WidgetsBindingObserver {
   }
 
   void recordFlutterError(FlutterErrorDetails details) {
-    log(
+    logStartup(
       'FLUTTER_ERROR',
       'exception=${details.exceptionAsString()}\n'
           'library=${details.library ?? 'unknown'}\n'
@@ -81,11 +85,15 @@ class DebugDiagnostics with WidgetsBindingObserver {
   }
 
   void recordAsyncError(Object error, StackTrace stack) {
-    log('PLATFORM_ERROR', 'exception=$error\nstack=$stack');
+    logStartup('PLATFORM_ERROR', 'exception=$error\nstack=$stack');
   }
 
   void log(String category, String message) {
     if (!kDebugMode) return;
+    logStartup(category, message);
+  }
+
+  void logStartup(String category, String message) {
     final file = _logFile;
     if (file == null) return;
     final timestamp = DateTime.now().toIso8601String();
