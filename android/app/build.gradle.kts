@@ -23,6 +23,14 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        externalNativeBuild {
+            cmake {
+                arguments += listOf("-DANDROID_STL=c++_shared")
+                cppFlags += listOf("-std=c++20", "-fexceptions", "-frtti")
+            }
+        }
     }
 
     buildTypes {
@@ -36,6 +44,21 @@ android {
             // The no-shrink Release has been verified on the target device.
             isMinifyEnabled = false
             isShrinkResources = false
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/qpdf/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
+    sourceSets {
+        getByName("main") {
+            // CMake links this prebuilt library, while jniLibs ensures the
+            // qpdf runtime itself is packaged beside libscana_qpdf.so.
+            jniLibs.srcDir("../third_party/qpdf/prebuilt")
         }
     }
 }
@@ -59,4 +82,8 @@ dependencies {
     implementation("com.google.ai.edge.litert:litert:1.4.1")
     // Bundled Korean model: available on first run without a network download.
     implementation("com.google.mlkit:text-recognition-korean:16.0.1")
+
+    testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.test:runner:1.7.0")
 }

@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'package:scana/features/camera/presentation/camera_preview_page.dart';
+import 'package:scana/features/pdf_editor/presentation/existing_pdf_editor_page.dart';
 import 'package:scana/features/scan_result/presentation/page_management_page.dart';
 import 'package:scana/features/scan_session/application/scan_session_manager.dart';
 import 'package:scana/models/scan_session.dart';
@@ -15,6 +16,9 @@ import 'package:scana/services/mlkit_document_scanner/mlkit_scan_workflow.dart';
 import 'package:scana/services/mlkit_document_scanner/mlkit_spread_analyzer.dart';
 import 'package:scana/services/mlkit_document_scanner/mlkit_spread_splitter.dart';
 import 'package:scana/services/orientation/screen_orientation_controller.dart';
+import 'package:scana/services/pdf_editor/existing_pdf_editor.dart';
+import 'package:scana/services/pdf_export/pdf_export_service.dart';
+import 'package:scana/services/pdf_export/pdf_saf_storage.dart';
 
 class ProductionScanHomeVisibility {
   const ProductionScanHomeVisibility._();
@@ -33,6 +37,8 @@ class ScanHomePage extends StatefulWidget {
     this.mlKitSpreadAnalyzer = const ConservativeMlKitSpreadAnalyzer(),
     this.mlKitSpreadSplitter = const LosslessMlKitSpreadSplitter(),
     this.orientationController = const SystemScreenOrientationController(),
+    this.existingPdfEditorPlatform = const AndroidExistingPdfEditorPlatform(),
+    this.pdfDestinationStorage = const AndroidSafPdfStorage(),
   });
 
   final ScanSessionManager sessionManager;
@@ -42,6 +48,8 @@ class ScanHomePage extends StatefulWidget {
   final MlKitSpreadAnalyzer mlKitSpreadAnalyzer;
   final MlKitSpreadSplitter mlKitSpreadSplitter;
   final ScreenOrientationController orientationController;
+  final ExistingPdfEditorPlatform existingPdfEditorPlatform;
+  final PdfDestinationStorage pdfDestinationStorage;
 
   @override
   State<ScanHomePage> createState() => _ScanHomePageState();
@@ -108,6 +116,13 @@ class _ScanHomePageState extends State<ScanHomePage> {
                     icon: const Icon(Icons.document_scanner_outlined),
                     label: const Text('스캔 시작'),
                   ),
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    key: const Key('editExistingPdfButton'),
+                    onPressed: _isScanning ? null : _openExistingPdf,
+                    icon: const Icon(Icons.picture_as_pdf_outlined),
+                    label: const Text('PDF 편집'),
+                  ),
                   if (_isScanning) ...[
                     const SizedBox(height: 24),
                     const Center(child: CircularProgressIndicator()),
@@ -167,6 +182,36 @@ class _ScanHomePageState extends State<ScanHomePage> {
     } on Object catch (error) {
       DebugDiagnostics.instance.log('MLKIT_SCAN', 'production_error $error');
       if (mounted) _showMessage('스캔 결과를 가져올 수 없습니다.');
+    } finally {
+      if (mounted) setState(() => _isScanning = false);
+    }
+  }
+
+  Future<void> _openExistingPdf() async {
+    if (_isScanning) return;
+    setState(() => _isScanning = true);
+    try {
+      final document = await widget.existingPdfEditorPlatform.pickPdf();
+      if (!mounted) {
+        if (document != null) {
+          await widget.existingPdfEditorPlatform.cleanup(document.sessionId);
+        }
+        return;
+      }
+      if (document == null) return;
+      await Navigator.of(context).push<void>(
+        MaterialPageRoute<void>(
+          builder: (context) => ExistingPdfEditorPage(
+            document: document,
+            editorPlatform: widget.existingPdfEditorPlatform,
+            destinationStorage: widget.pdfDestinationStorage,
+          ),
+        ),
+      );
+    } on Object {
+      if (mounted) {
+        _showMessage('PDF를 불러올 수 없습니다. 암호 또는 파일 상태를 확인해주세요.');
+      }
     } finally {
       if (mounted) setState(() => _isScanning = false);
     }

@@ -224,6 +224,15 @@ Android detector는 최대 변 1400px 분석 이미지에서 LAB의 넓은 low-c
 - Android `pdf_document` MethodChannel은 SAF content URI를 `ACTION_VIEW`, `application/pdf`, `FLAG_GRANT_READ_URI_PERMISSION`으로 연다. Viewer가 없거나 열기가 실패해도 완료 overlay와 저장 결과를 유지한다.
 - Android SAF 계층은 pending `MethodChannel.Result`를 하나만 보유하고 Activity 결과 수신 전에 참조를 제거한다. picker 실행 실패와 FlutterEngine 정리도 pending result를 정확히 한 번 완료하며 Flutter Navigation에는 관여하지 않는다.
 
+## V1.2 기존 PDF 편집 계층
+
+- 홈의 기존 PDF 편집 진입점은 Android `ACTION_OPEN_DOCUMENT`로 PDF 한 개를 선택하고 앱 캐시의 전용 작업 디렉터리에 복사한다. 원본 content URI와 원본 파일은 수정하거나 삭제하지 않는다.
+- Flutter `ExistingPdfEditor` 계약과 Android `ExistingPdfEditorPlugin` MethodChannel 구현을 분리한다. Android 계층은 `PdfRenderer`로 요청된 페이지만 지연 렌더링하고 썸네일 캐시 크기를 제한한다.
+- 편집 화면은 원본 page index의 중복 없는 순서 목록과 삭제 목록을 소유한다. 삭제는 저장 전 복원할 수 있고 0페이지 출력은 Flutter와 Kotlin 정책 계층 모두에서 거부한다.
+- qpdf 12.4.2 JNI bridge는 선택된 페이지 객체를 직접 복사해 별도 임시 PDF를 만든다. Bitmap 기반 재생성이나 이미지 재압축을 하지 않으며 C++ 예외는 JNI 내부에서 Kotlin 오류로 변환한다.
+- `armeabi-v7a`, `arm64-v8a`, `x86_64`의 고정 `libqpdf.so`와 각 ABI의 JNI bridge 및 `c++_shared`를 APK에 함께 패키징한다. 버전·소스·prebuilt SHA-256은 `android/third_party/qpdf/VERSIONS.md`를 기준으로 검증한다.
+- 출력의 유효성과 페이지 수를 검사한 뒤 기존 SAF 저장 계층으로 새 이름의 PDF를 기록한다. 완료·취소·실패 시 PDF 편집 전용 임시 파일만 정리하며 `ScanSessionManager.deleteAfterSuccessfulExport()`는 호출하지 않는다.
+
 ## Navigation과 객체 소유권
 
 - 앱 최상위 flow만 `CameraSession`과 `ScanSessionManager`를 소유하며, 소유권을 명시적으로 전달받은 경우에만 dispose/close한다. Camera, Gallery, Viewer와 Review는 주입받은 manager를 dispose하지 않는다.

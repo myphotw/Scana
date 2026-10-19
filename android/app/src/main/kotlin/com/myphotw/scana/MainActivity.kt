@@ -22,6 +22,7 @@ import com.myphotw.scana.imageprocessing.OpenCvPageCorrector
 import com.myphotw.scana.imageprocessing.OpenCvPageCorrector.CurvedCorrectionException
 import com.myphotw.scana.imageprocessing.OpenCvPageEnhancer
 import com.myphotw.scana.ocr.AndroidLocalOcrService
+import com.myphotw.scana.pdfeditor.ExistingPdfEditorPlugin
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -41,6 +42,7 @@ class MainActivity : FlutterActivity() {
     private var pdfDocumentChannel: MethodChannel? = null
     private var debugDiagnosticsChannel: MethodChannel? = null
     private var mlKitScannerChannel: MethodChannel? = null
+    private var existingPdfEditorPlugin: ExistingPdfEditorPlugin? = null
     private var pendingDirectoryResult: MethodChannel.Result? = null
     private var pendingDirectoryRequestId: Long? = null
     private var nextDirectoryRequestId = 0L
@@ -74,6 +76,10 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun configureFlutterChannels(flutterEngine: FlutterEngine) {
+        existingPdfEditorPlugin = ExistingPdfEditorPlugin(
+            this,
+            flutterEngine.dartExecutor.binaryMessenger,
+        )
         mlKitScannerChannel =
             MethodChannel(
                 flutterEngine.dartExecutor.binaryMessenger,
@@ -577,6 +583,9 @@ class MainActivity : FlutterActivity() {
 
     @Deprecated("Deprecated in Android; retained for FlutterActivity SAF compatibility.")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (existingPdfEditorPlugin?.onActivityResult(requestCode, resultCode, data) == true) {
+            return
+        }
         if (requestCode == REQUEST_MLKIT_SCAN) {
             completeMlKitScan(resultCode, data)
             return
@@ -623,6 +632,8 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        existingPdfEditorPlugin?.dispose()
+        existingPdfEditorPlugin = null
         mlKitScannerChannel?.setMethodCallHandler(null)
         mlKitScannerChannel = null
         resetMlKitScan(reason = "flutter_engine_cleanup")?.result?.error(
@@ -1283,11 +1294,12 @@ class MainActivity : FlutterActivity() {
             treeUri,
             DocumentsContract.getTreeDocumentId(treeUri),
         )
+        val availableFileName = availableDocumentName(treeUri, fileName)
         val documentUri = DocumentsContract.createDocument(
             contentResolver,
             parentDocument,
             "application/pdf",
-            fileName,
+            availableFileName,
         ) ?: throw IllegalStateException("The destination document could not be created.")
         try {
             source.inputStream().use { input ->
@@ -1302,7 +1314,7 @@ class MainActivity : FlutterActivity() {
             check(byteCount > 0) { "The saved PDF is empty." }
             return mapOf(
                 "uri" to documentUri.toString(),
-                "displayName" to documentDisplayName(documentUri, fileName),
+                "displayName" to documentDisplayName(documentUri, availableFileName),
                 "byteCount" to byteCount,
             )
         } catch (error: Throwable) {
@@ -1314,6 +1326,30 @@ class MainActivity : FlutterActivity() {
     private fun recentDirectoryMap(): Map<String, Any>? {
         val uri = recentDirectoryUri() ?: return null
         return directoryMap(uri)
+    }
+
+    private fun availableDocumentName(treeUri: Uri, requestedName: String): String {
+        val existingNames = mutableSetOf<String>()
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+            treeUri,
+            DocumentsContract.getTreeDocumentId(treeUri),
+        )
+        contentResolver.query(
+            childrenUri,
+            arrayOf(OpenableColumns.DISPLAY_NAME),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            while (cursor.moveToNext()) {
+                cursor.getString(0)?.let(existingNames::add)
+            }
+        }
+        if (requestedName !in existingNames) return requestedName
+        val base = requestedName.removeSuffix(".pdf")
+        var suffix = 1
+        while ("$base ($suffix).pdf" in existingNames) suffix++
+        return "$base ($suffix).pdf"
     }
 
     private fun recentDirectoryUri(): Uri? {

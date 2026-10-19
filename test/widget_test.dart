@@ -37,6 +37,8 @@ void main() {
     expect(find.text('1면 스캔'), findsNothing);
     expect(find.text('2면 스캔'), findsNothing);
     expect(find.byKey(const Key('startMlKitScanButton')), findsOneWidget);
+    expect(find.byKey(const Key('editExistingPdfButton')), findsOneWidget);
+    expect(find.text('PDF 편집'), findsOneWidget);
     expect(find.byKey(const Key('openLegacyScannerButton')), findsOneWidget);
   });
 

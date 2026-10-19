@@ -19,6 +19,8 @@
 | Google ML Kit Text Recognition Korean 16.0.1 (`com.google.mlkit:text-recognition-korean`) | bundled 기기 내 한국어 OCR·PDF 제목 제안 | Google ML Kit Terms / Google APIs Terms (비 오픈소스 SDK) |
 | Google Play services ML Kit Document Scanner 16.0.0 (`com.google.android.gms:play-services-mlkit-document-scanner`) | Production 기본 스캐너 UI·문서 보정·JPEG 결과 | Google APIs Terms / Google Play services SDK Terms (비 오픈소스 SDK) |
 | image 4.9.1 | ML Kit 2면 JPEG의 원본 해상도 ROI crop 및 lossless PNG 저장 | BSD 3-Clause |
+| qpdf 12.4.2 | V1.2 기존 PDF 페이지 객체 선택·삭제·재배열 | Apache License 2.0 |
+| libjpeg-turbo 3.2.0 | qpdf의 정적 libjpeg API 의존성 | IJG License / BSD 3-Clause |
 
 ## 도입 규칙
 
@@ -51,6 +53,14 @@ Google Play services ML Kit Document Scanner 16.0.0은 Scana production primary 
 
 - image package: https://pub.dev/packages/image
 - image license: https://pub.dev/packages/image/license
+
+qpdf 12.4.2는 기존 PDF의 페이지 객체를 렌더링하거나 재압축하지 않고 선택·재배열하는 V1.2 제품 엔진이다. `armeabi-v7a`, `arm64-v8a`, `x86_64` 네이티브 라이브러리를 `c++_shared`로 빌드하며 Apache License 2.0을 따른다. qpdf에 정적으로 연결된 libjpeg API는 libjpeg-turbo 3.2.0에서 제공하며 IJG/BSD 조건을 따른다. Scana는 TurboJPEG API와 libjpeg 명령행 도구를 배포하지 않는다.
+
+This software is based in part on the work of the Independent JPEG Group.
+
+- qpdf 공식 저장소: https://github.com/qpdf/qpdf/tree/v12.4.2
+- libjpeg-turbo 공식 저장소: https://github.com/libjpeg-turbo/libjpeg-turbo/tree/3.2.0
+- 고정 버전·커밋·소스 SHA-256·재현 빌드 설정: `android/third_party/qpdf/VERSIONS.md`
 
 - 공식 Android Document Scanner 가이드: https://developers.google.com/ml-kit/vision/doc-scanner/android
 - Google ML Kit Terms: https://developers.google.com/ml-kit/terms

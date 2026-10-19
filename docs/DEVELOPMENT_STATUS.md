@@ -1,6 +1,15 @@
 ﻿# 개발 상태
 
-최종 갱신: 2026-08-13
+최종 갱신: 2026-10-19
+
+## V1.2 릴리스 상태
+
+| 항목 | 상태 | 비고 |
+| --- | --- | --- |
+| 기존 PDF 편집 | 완료/실기기 확인 | SAF 불러오기, 순서 변경, 삭제·복원, 원본 보존 수정본 저장을 Galaxy Tab S7+에서 확인 |
+| qpdf 제품 엔진 | 완료 | qpdf 12.4.2, libjpeg-turbo 3.2.0, 3 ABI, JNI 예외 경계와 SHA-256 잠금 |
+| 스캔 기능 분리 | 완료 | ML Kit/ScanSession/Dart PDF Export와 독립된 PDF 편집 작업 공간·정리 정책 |
+| PDFBox 기술 PoC | 제거 | qpdf 채택과 실기기 확인 완료에 따라 PoC 코드·테스트·의존성 제거 |
 
 | Scana V1 AI Primary Crop | 구현 | AI Final/Hybrid/Raw → OpenCV → Guide production priority, 실기기 검증 필요 |
 | Visibility-Safe Boundary | 구현 | 변별 visibility, bottom-beyond 검사, conservative hybrid polygon |
@@ -56,7 +65,7 @@
 | Quick Corner Edit | 구현 완료, 실기기 평가 필요 | 현재 final crop 초기값, 고정 이미지 위 corner-only drag, 적용 후 전체 자동 correction pipeline 재실행 |
 | V1 AI Primary Crop | 구현 완료, 실기기 평가 필요 | AI Refined/Hybrid/Raw fallback 우선, OpenCV·Guide 안전 fallback 유지 |
 | V1 Edge Visibility | 구현 완료, 실기기 평가 필요 | confirmed/weak/occluded/out-of-frame/unknown 및 하단 전경·종이 연속성 검사 |
-| 외부 라이브러리 | 사용 중 | camera, path, path_provider, pdf, uuid, OpenCV, ML Kit Text Recognition Korean |
+| 외부 라이브러리 | 사용 중 | camera, path, path_provider, pdf, uuid, OpenCV, ML Kit, LiteRT, qpdf 12.4.2, libjpeg-turbo 3.2.0 |
 
 ## Known Issues
 
@@ -83,4 +92,4 @@
 
 ## 다음 단계
 
-동일 평면 문서·최근 얇은 책 3장·강한 곡률 책·가림/그림자 불확실 샘플에서 contour/internal fusion 상태 분류와 Perspective fallback을 승인하면 Curved Dewarp V1을 동결하고 UI Cleanup으로 전환한다. 얇은 책은 일부 MILD 적용과 육안 geometry/text 개선, 평면 문서는 FLAT, 충돌 샘플은 UNRELIABLE이어야 한다.
+V1.2 릴리스 후보는 코드·문서·버전과 Release APK 검증 후 사용자가 직접 커밋·태그·배포한다. 기존 스캔 품질의 장기 실기기 검증 항목은 Known Issues로 유지하되 V1.2 PDF 편집 릴리스 범위와 분리한다.

@@ -1,5 +1,14 @@
 ﻿# 로드맵
 
+## V1.2 — Existing PDF Page Editor (완료)
+
+- Android SAF로 기존 PDF를 선택하고 독립 작업 공간에서 처리한다.
+- Android PdfRenderer로 필요한 썸네일만 지연 생성하며 제한된 캐시를 사용한다.
+- 페이지 순서 변경, 삭제와 저장 전 복원을 제공하고 0페이지 출력을 방지한다.
+- qpdf 12.4.2로 페이지 객체를 직접 선택·재배열해 원본을 보존한 수정본을 별도 저장한다.
+- ScanSession과 기존 ML Kit 스캔·PDF 생성 흐름은 변경하지 않는다.
+- Galaxy Tab S7+에서 주요 불러오기·편집·저장 흐름을 실기기 확인했다.
+
 ## Scana V1 — AI Primary Crop + Quick Corner Edit
 
 - FairScan AI Final을 production primary crop으로 사용하고 `AI Refined → AI Hybrid → AI Raw safety fallback → OpenCV/Q1.x → Guide` 순서를 유지한다.
